@@ -6,11 +6,16 @@ import re
 import sys
 import tempfile
 import unittest
-from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from datetime import datetime  # noqa: E402
+
 from pyfog import cli, config, fog, local, render, util  # noqa: E402
+
+
+def rows_dt(text):
+    return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
 
 
 class ConfigTests(unittest.TestCase):
@@ -158,6 +163,51 @@ def _task(**kw):
             "multicast_session": 7}
     base.update(kw)
     return base
+
+
+class ClockTests(unittest.TestCase):
+    class FakeDB(object):
+        def __init__(self, rows, settings):
+            self.rows = rows
+            self._settings = settings
+
+        def query(self, sql, params=()):
+            if "globalSettings" in sql:
+                return [{"settingKey": k, "settingValue": v} for k, v in self._settings.items()]
+            return []
+
+        def one(self, sql, params=()):
+            return self.rows
+
+        def scalar(self, sql, params=()):
+            return self.rows["db"]
+
+    def _fog(self, rows, tz):
+        from datetime import datetime
+        parsed = {k: datetime.strptime(v, "%Y-%m-%d %H:%M:%S") if v else None
+                  for k, v in rows.items()}
+        return fog.Fog(self.FakeDB(parsed, {"FOG_TZ_INFO": tz}), None)
+
+    def test_reference_is_fog_utc_not_the_db_clock(self):
+        # DB server runs local time (+2h); FOG stores UTC.
+        rows = {"utc": "2026-09-05 12:00:00", "db": "2026-09-05 14:00:00", "fog": None}
+        f = self._fog(rows, "UTC")
+        self.assertEqual(f.now(), rows_dt(rows["utc"]))
+        self.assertEqual(f._fog_utc_offset(), 0)
+        self.assertEqual(f.clock_diagnosis()["db_skew"], 7200)
+
+    def test_named_zone_uses_convert_tz(self):
+        rows = {"utc": "2026-09-05 12:00:00", "db": "2026-09-05 12:00:00",
+                "fog": "2026-09-05 14:00:00"}
+        f = self._fog(rows, "Europe/Berlin")
+        self.assertEqual(f.now(), rows_dt(rows["fog"]))
+        self.assertEqual(f._fog_utc_offset(), 7200)
+
+    def test_named_zone_without_tz_tables_falls_back(self):
+        rows = {"utc": "2026-09-05 12:00:00", "db": "2026-09-05 13:00:00", "fog": None}
+        f = self._fog(rows, "Europe/Berlin")
+        self.assertEqual(f.now(), rows_dt(rows["db"]))
+        self.assertIn("time zone tables", f._now_source)
 
 
 class SenderMatchingTests(unittest.TestCase):

@@ -229,6 +229,14 @@ and the `$databaseFields` maps in `packages/web/lib/fog/*.class.php`.
   UTC to the database session's clock before they are compared. The
   newer of the two is shown, with its source, and logs that exist but
   cannot be read are named in the heading.
+* **Time zone** (`pyfog info`): FOG writes every datetime through its PHP
+  layer in the zone named by `FOG_TZ_INFO` (default UTC), whatever the
+  database server's own time zone is. pyfog's reference "now" is therefore
+  `UTC_TIMESTAMP()` put into FOG's zone, not the server's `NOW()`; using
+  `NOW()` on a UTC FOG whose database server runs local time would make
+  every age wrong by the offset, so running tasks would look stale and
+  live hosts silent. `pyfog info` prints the reference time, its zone, and
+  a warning when the server's own clock differs.
 * **FOG client intervals** (`pyfog info`): the client asks the server for
   its configuration on every cycle (`lib/fog/fogpage.class.php`,
   `requestClientInfo`), and the server answers with

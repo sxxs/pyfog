@@ -99,15 +99,47 @@ class Fog(object):
         self.db = db
         self.settings = settings
         self._now = None
+        self._utc_now = None
+        self._now_source = None
         self._settings = None
 
     # -- reference facts ----------------------------------------------------
 
     def now(self):
-        """Reference time from the database server, not from this machine."""
-        if self._now is None:
-            self._now = self.db.scalar("SELECT NOW()")
+        """Reference time in the same wall clock as the stored timestamps.
+
+        FOG writes every datetime in the time zone named by FOG_TZ_INFO
+        (default UTC), through its PHP layer, regardless of the database
+        server's own time zone. If the server's clock differs -- a UTC FOG
+        on a database whose system zone is local time is the usual case --
+        then SELECT NOW() is not the clock the rows are in, and every age
+        computed against it is wrong by the offset (tasks look stale, hosts
+        look silent). So the reference is UTC_TIMESTAMP() converted into
+        FOG's zone, never the raw NOW()."""
+        self._resolve_now()
         return self._now
+
+    def fog_timezone(self):
+        return (self.setting("FOG_TZ_INFO") or "UTC").strip() or "UTC"
+
+    def _resolve_now(self):
+        if self._now is not None:
+            return
+        tz = self.fog_timezone()
+        row = self.db.one("SELECT UTC_TIMESTAMP() AS utc, NOW() AS db, "
+                          "CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', %s) AS fog", [tz])
+        self._utc_now = row["utc"]
+        if tz.upper() in ("UTC", "GMT", "+00:00", "ETC/UTC", "ETC/GMT"):
+            self._now, self._now_source = row["utc"], "FOG stores UTC"
+        elif row["fog"] is not None:
+            self._now, self._now_source = row["fog"], "FOG stores " + tz
+        else:
+            # CONVERT_TZ returns NULL when the named zone is not in the
+            # server's mysql.time_zone_name table; the database clock is
+            # then the best guess (correct when its zone matches FOG's).
+            self._now = row["db"]
+            self._now_source = ("database clock; FOG_TZ_INFO is %r but the MySQL "
+                                "time zone tables are not loaded" % tz)
 
     def setting(self, key, default=None):
         """A row from globalSettings."""
@@ -116,12 +148,13 @@ class Fog(object):
             self._settings = {r["settingKey"]: r["settingValue"] for r in rows}
         return self._settings.get(key, default)
 
-    def utc_offset(self):
-        """Seconds the database session's clock is ahead of UTC. Log times
-        are converted through UTC, so they compare with NOW() correctly
-        even when the database session and this process disagree on the
-        time zone."""
-        return to_int(self.db.scalar("SELECT TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), NOW())"))
+    def _fog_utc_offset(self):
+        """Seconds FOG's clock is ahead of UTC. Access log lines carry their
+        own offset and are reduced to naive UTC; adding this puts them in
+        the same wall clock as now(), whatever the database server's own
+        zone is."""
+        self._resolve_now()
+        return int((self._now - self._utc_now).total_seconds())
 
     def checkin_timeout(self):
         """Seconds without check-in after which FOG re-queues a task
@@ -425,7 +458,7 @@ class Fog(object):
 
         paths = local.find_access_logs() if log_paths is None else log_paths
         seen, unreadable = local.client_calls(paths, log_bytes)
-        offset = timedelta(seconds=self.utc_offset())
+        offset = timedelta(seconds=self._fog_utc_offset())
         calls = {}
         for mac, entry in seen.items():
             entry["last_seen"] += offset  # naive UTC -> the database's clock
@@ -674,6 +707,7 @@ class Fog(object):
             "database": "%s@%s/%s" % (values["DATABASE_USERNAME"], values["DATABASE_HOST"],
                                       values["DATABASE_NAME"]),
             "server_time": dt_text(self.now()),
+            "clock": self.clock_diagnosis(),
             "checkin_timeout": self.checkin_timeout(),
             "client": self.client_settings(),
             "udp_sender": values.get("UDPSENDERPATH"),
@@ -698,6 +732,20 @@ class Fog(object):
                 "interface": n["ngmInterface"],
                 "max_clients": n["ngmMaxClients"],
             } for n in nodes],
+        }
+
+    def clock_diagnosis(self):
+        """How the reference clock relates to the database server's own, so
+        pyfog can say when a time zone mismatch would skew every age."""
+        self._resolve_now()
+        db_now = self.db.scalar("SELECT NOW()")
+        skew = int((db_now - self._now).total_seconds())
+        return {
+            "reference": dt_text(self._now),
+            "source": self._now_source,
+            "db_now": dt_text(db_now),
+            "db_skew": skew,
+            "fog_timezone": self.fog_timezone(),
         }
 
     def client_settings(self):

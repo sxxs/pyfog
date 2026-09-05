@@ -490,6 +490,16 @@ def scheduled(data, palette, out=sys.stdout, sort=None):
     table.write(out, palette, sort=sort)
 
 
+def _clock(clock, palette):
+    """The reference clock, and a warning when the database server's own
+    clock differs, because then every age depends on getting this right."""
+    text = "%s  (%s)" % (clock["reference"], clock["source"])
+    if clock["db_skew"]:
+        text += palette.red("; the database server clock is %s, %+d s away, so its "
+                            "own NOW() would skew every age" % (clock["db_now"], clock["db_skew"]))
+    return text
+
+
 def info(data, palette, out=sys.stdout, sort=None):
     c = data["counts"]
     _pairs([
@@ -497,7 +507,7 @@ def info(data, palette, out=sys.stdout, sort=None):
         ("Schema version", data["schema_version"]),
         ("Database", data["database"]),
         ("Settings from", data["config_source"]),
-        ("Server time", data["server_time"]),
+        ("Reference time", _clock(data["clock"], palette)),
         ("Check-in timeout", "%d s" % data["checkin_timeout"]),
         ("udp-sender", data["udp_sender"]),
         ("Multicast ports", "from %d" % data["multicast_port_base"]),
