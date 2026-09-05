@@ -393,9 +393,18 @@ def history(data, palette, out=sys.stdout, expand=False):
         for t in rows:
             table.add(("  " if "session" in entry else "") + str(t["id"]), t["host"], t["type"],
                       t["image"], palette.result(t["result"]), short_dt(t["created"]),
-                      short_dt(t["started"]), short_dt(t["finished"]), age_text(t["duration"]),
+                      short_dt(t["started"]), _finished(t, palette), age_text(t["duration"]),
                       t["created_by"])
     table.write(out, palette)
+
+
+def _finished(task, palette):
+    """FOG logs no time for a cancellation, so the last sign of life stands in."""
+    if task["finished"]:
+        return short_dt(task["finished"])
+    if task["last_checkin"]:
+        return palette.dim("silent since " + short_dt(task["last_checkin"]))
+    return palette.dim("never checked in")
 
 
 def scheduled(data, palette, out=sys.stdout):

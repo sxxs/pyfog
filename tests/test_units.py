@@ -285,6 +285,19 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(render.frame("x" * 20, size=(20, 10)).count("x"), 18)  # never the last column
         self.assertNotIn("more lines", render.frame("a\nb\nc", size=(0, 0)))
 
+    def test_history_marks_cancelled_tasks_by_their_last_sign_of_life(self):
+        task = {"id": 9, "host": "pc", "type": "Deploy", "image": "i", "result": "cancelled",
+                "created": "2026-09-04 19:00:00", "started": "2026-09-04 19:38:00",
+                "finished": None, "duration": None, "created_by": "fog",
+                "last_checkin": "2026-09-04 19:47:32"}
+        out = _Buffer()
+        render.history([task], render.Palette(False), out)
+        self.assertIn("silent since 2026-09-04 19:47", out.text)
+        task.update(last_checkin=None)
+        out = _Buffer()
+        render.history([task], render.Palette(False), out)
+        self.assertIn("never checked in", out.text)
+
     def test_scheduled_without_a_date(self):
         out = _Buffer()
         render.scheduled([{"id": 1, "name": "n", "type": "Deploy", "when": None, "cron": None,
