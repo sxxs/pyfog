@@ -129,17 +129,37 @@ pc04  10.0.0.14  Win11-Lab  deploy  2026-09-05 08:25:55  41m 46s  none (FOG lost
 
 ## Installation
 
-Copy the directory onto the FOG server, install PyMySQL from the distro
-(`python3-pymysql`) or into a venv (`pip install -r requirements.txt`),
-and run `bin/pyfog` or `python3 -m pyfog`. `pip install .` installs a
-`pyfog` command instead. Credentials are read from FOG's own
-`lib/fog/config.class.php` (falling back to `/opt/fog/.fogsettings`), so
-run it as root or as a user that may read that file. Alternatives:
-`--config PATH`, `--db-host/--db-name/--db-user/--db-password`, or the
-environment variables `PYFOG_DB_HOST`, `PYFOG_DB_NAME`, `PYFOG_DB_USER`,
-`PYFOG_DB_PASSWORD` (`PYFOG_CONFIG` for the config file).
+On the FOG server, as root:
 
-A dedicated read-only database account is the sensible setup:
+```
+git clone https://github.com/sxxs/pyfog.git && sudo pyfog/install.sh
+```
+
+or, without git on the server, build a tarball on your machine with
+`make dist`, copy `dist/pyfog-<version>.tar.gz` over and run
+
+```
+tar xzf pyfog-<version>.tar.gz && sudo pyfog-<version>/install.sh
+```
+
+`install.sh` installs the distribution's PyMySQL package (apt, dnf, yum
+or pacman), copies the code to `/opt/pyfog`, links `/usr/local/bin/pyfog`
+and ends with `pyfog info` as a check. Running it again updates the
+installation; `--uninstall` removes it. Nothing else is written
+anywhere: no service, no cron job, no config file.
+
+Credentials are read from FOG's own `lib/fog/config.class.php` (falling
+back to `/opt/fog/.fogsettings`), so as root nothing needs to be set up.
+For other users, or from another machine, pass `--config PATH`,
+`--db-host/--db-name/--db-user/--db-password`, or set the environment
+variables `PYFOG_DB_HOST`, `PYFOG_DB_NAME`, `PYFOG_DB_USER`,
+`PYFOG_DB_PASSWORD` (`PYFOG_CONFIG` for the config file). Without
+`install.sh`, `bin/pyfog` runs from any checkout with `python3-pymysql`
+installed, and `pip install .` installs a `pyfog` command into a venv.
+
+A dedicated read-only database account is the sensible setup for
+anyone who is not root; `install.sh --reader PASSWORD` creates it, or by
+hand:
 
 ```sql
 CREATE USER 'fogread'@'localhost' IDENTIFIED BY '...';
@@ -209,6 +229,8 @@ pyfog/fog.py        data layer: plain dicts, no printing
 pyfog/render.py     tables for the terminal
 pyfog/cli.py        argument parsing and wiring
 tests/               python3 -m unittest
+install.sh           installer for the FOG server
+Makefile             make test, make smoke, make dist
 ```
 
 A web front end can build on `pyfog.fog.Fog` alone; every method returns
