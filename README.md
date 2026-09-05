@@ -186,20 +186,22 @@ dumping the result, together with the reference rows FOG inserts itself
 (task states, task types, settings). `tests/seed.sql` adds six hosts,
 two images, two groups, tasks in every state, one multicast session,
 imaging and snapin logs, and `tests/access.log` a matching web server
-log. On a development machine with Docker:
+log. With Docker Desktop on a development machine, `docker-compose.yml`
+starts a MariaDB that loads both files on first start and runs pyfog in
+a Debian container next to it, installed the way it would be on a FOG
+server (`python3-pymysql` from apt):
 
 ```
-docker run --rm -d --name pyfog-db -p 3307:3306 \
-    -e MARIADB_ROOT_PASSWORD=fog -e MARIADB_DATABASE=fog mariadb:10.11
-sleep 10   # until the server accepts connections
-docker exec -i pyfog-db mariadb -u root -pfog fog < tests/fog-schema.sql
-docker exec -i pyfog-db mariadb -u root -pfog fog < tests/seed.sql
-
-export PYFOG_DB_HOST=127.0.0.1:3307 PYFOG_DB_USER=root PYFOG_DB_PASSWORD=fog PYFOG_DB_NAME=fog
-tests/smoke.sh          # every command once, plus JSON round trips
-bin/pyfog tasks         # or any single command
-docker stop pyfog-db
+docker compose run --rm pyfog tasks                    # any command
+docker compose run --rm pyfog --json multicast
+docker compose run --rm --entrypoint tests/smoke.sh pyfog
+docker compose down -v                                 # drop the database
 ```
+
+The checkout is mounted into the container, so edits need no rebuild.
+To use the database from the host instead, add a `ports: ["3307:3306"]`
+entry to the `db` service and point `PYFOG_DB_HOST=127.0.0.1:3307`,
+`PYFOG_DB_USER=root`, `PYFOG_DB_PASSWORD=fog`, `PYFOG_DB_NAME=fog` at it.
 
 Any other MariaDB or MySQL works the same way; the seed uses
 `NOW()`-relative timestamps, so ages and stale markers come out
@@ -208,13 +210,17 @@ running, task 2 checked in but silent (stale), task 3 queued, tasks 4
 to 6 folded into multicast session 1, pc04 imaging without a task, a
 failed snapin on pc01, and pc02 silent for two days in `clients`.
 
-The multicast process check needs real processes. To exercise it, start
-a stand-in sender the way FOG does and store the shell's pid in the
-session:
+The multicast process check needs real processes in the same container
+as pyfog. To exercise it, start a stand-in sender the way FOG does and
+store the shell's pid in the session:
 
 ```
-sh -c 'sleep 3600; sleep 3600' &     # FOG wraps udp-sender in /bin/sh
-mysql ... -e "UPDATE multicastSessions SET msSenderPID=$! WHERE msID=1"
+docker compose run --rm --entrypoint sh pyfog
+# inside the container:
+sh -c 'sleep 3600; sleep 3600' &      # FOG wraps udp-sender in /bin/sh
+python3 -c "import pymysql; c = pymysql.connect(host='db', user='root', password='fog', database='fog'); \
+  c.cursor().execute('UPDATE multicastSessions SET msSenderPID=$! WHERE msID=1'); c.commit()"
+python3 -m pyfog multicast
 ```
 
 `pyfog multicast` then reports the wrapper as alive; with a real

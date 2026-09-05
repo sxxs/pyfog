@@ -1,0 +1,34 @@
+# Throwaway test setup: a MariaDB with FOG's table layout and the seed
+# data, and pyfog in a Debian container pointed at it.
+#
+#   docker compose run --rm pyfog tasks
+#   docker compose run --rm pyfog --json multicast
+#   docker compose run --rm --entrypoint tests/smoke.sh pyfog
+#   docker compose down -v            # drop the database again
+services:
+  db:
+    image: mariadb:10.11
+    environment:
+      MARIADB_ROOT_PASSWORD: fog
+      MARIADB_DATABASE: fog
+    volumes:
+      # Run in name order on first start, into the fog database.
+      - ./tests/fog-schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
+      - ./tests/seed.sql:/docker-entrypoint-initdb.d/20-seed.sql:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  pyfog:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PYFOG_DB_HOST: db
+      PYFOG_DB_USER: root
+      PYFOG_DB_PASSWORD: fog
+      PYFOG_DB_NAME: fog
+    volumes:
+      - .:/app   # edits on the host are visible without a rebuild
