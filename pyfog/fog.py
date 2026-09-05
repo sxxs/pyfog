@@ -29,6 +29,14 @@ IMAGE_FORMATS = {"0": "Partclone Gzip", "1": "Partimage", "2": "Partclone Gzip s
 # imagingLog.ilType, see lib/reports/imaging_log.report.php
 IMAGING_KINDS = {"up": "capture", "down": "deploy"}
 
+# taskTypes.ttID. Only these write an imagingLog row of their own
+# (isDeploy() and isCapture() in lib/fog/tasktype.class.php).
+IMAGING_TYPES = "(1, 2, 8, 15, 16, 17, 24)"  # for use inside SQL text
+# Snapin jobs are the one kind of task whose taskCheckIn keeps moving:
+# the FOG client writes it again on every contact
+# (lib/client/snapinclient.class.php), so it is a last report, not a start.
+SNAPIN_TYPES = (12, 13)
+
 # A FOG client that authorizes gets hosts.hostSecTime = now + 30 minutes
 # (lib/fog/fogpage.class.php), so hostSecTime - 30 min is the last
 # authorization the database can prove.
@@ -263,7 +271,18 @@ class Fog(object):
             "WHERE a.msID = %s ORDER BY h.hostName", [session_id])]
 
     def history(self, host=None, image=None, days=None, limit=100):
-        """Finished tasks with the times taskLog recorded for them."""
+        """Finished tasks with the times FOG really recorded for them.
+
+        Not from taskLog: FOG writes its two rows, In-Progress and
+        Complete, with the *task's* creation time in both
+        (taskLog() in lib/reg-task/taskingelement.class.php), so taskLog
+        says that a host reported, never when, and every task read out of
+        it lasts zero seconds. The times that are real are
+        tasks.taskCheckIn, written once when the host takes the task, and
+        the imagingLog row a deploy or capture writes itself. FOG's own
+        host history page pairs the two the same way, by host and start
+        time (lib/pages/hostmanagementpage.class.php).
+        """
         where = ["t.taskStateID IN (%s, %s)"]
         params = list(FINISHED_STATES)
         host_filter(host, where, params)
@@ -274,17 +293,26 @@ class Fog(object):
             where.append("t.taskCreateTime >= DATE_SUB(NOW(), INTERVAL %s DAY)")
             params.append(days)
         sql = TASK_SQL.replace("FROM tasks t", """
-            , (SELECT MIN(createTime) FROM taskLog WHERE taskID = t.taskID
-                 AND taskStateID = 3) AS started
-            , (SELECT MAX(createTime) FROM taskLog WHERE taskID = t.taskID
-                 AND taskStateID = 4) AS finished
-            FROM tasks t""")
+            , (SELECT COUNT(*) FROM taskLog l WHERE l.taskID = t.taskID
+                 AND l.taskStateID = %s) AS completeRows
+            , il.ilStartTime AS imagingStart
+            , NULLIF(il.ilFinishTime, '0000-00-00 00:00:00') AS finished
+            FROM tasks t
+            LEFT JOIN imagingLog il ON il.ilID = (
+                SELECT il2.ilID FROM imagingLog il2
+                WHERE il2.ilHostID = t.taskHostID
+                  AND t.taskTypeID IN """ + IMAGING_TYPES + """
+                  AND ABS(TIMESTAMPDIFF(SECOND, il2.ilStartTime, t.taskCheckIn)) <= 2
+                ORDER BY il2.ilID DESC LIMIT 1)""")
         sql += where_sql(where) + \
             " ORDER BY COALESCE(finished, t.taskCheckIn, t.taskCreateTime) DESC LIMIT %s"
         entries = []
-        for row in self.db.query(sql, params + [limit]):
+        for row in self.db.query(sql, [COMPLETE] + params + [limit]):
             task = self._task(row)
-            started, finished = parse_dt(row["started"]), parse_dt(row["finished"])
+            started = parse_dt(row["imagingStart"])
+            if started is None and row["taskTypeID"] not in SNAPIN_TYPES:
+                started = parse_dt(row["taskCheckIn"])
+            finished = parse_dt(row["finished"])
             task.update(
                 started=dt_text(started),
                 finished=dt_text(finished),
@@ -293,7 +321,7 @@ class Fog(object):
                 result="ok" if task["state_id"] == COMPLETE else "cancelled",
                 # Complete without the host's own completion row: the server
                 # closed it (see imaging_open).
-                reported=finished is not None,
+                reported=row["completeRows"] > 0,
             )
             entries.append(task)
         return entries

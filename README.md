@@ -115,7 +115,7 @@ FOG's GUI and API remain the place for that.
 |----------------------------|----------------------------------------------------------------|
 | `pyfog tasks`             | what is queued or running right now; one line per multicast session; imaging runs FOG lost track of |
 | `pyfog task <id>`         | one task in detail, with every host imaging alongside it (multicast session or group batch) |
-| `pyfog history`           | finished tasks with start/end times from `taskLog`, newest first |
+| `pyfog history`           | finished tasks with the times FOG recorded for them, newest first |
 | `pyfog scheduled`         | delayed and cron tasks FOG will create later                    |
 | `pyfog multicast`         | sessions, participants, the `udp-sender` processes and their udpcast log; orphaned senders |
 | `pyfog clients`           | when each host's FOG client last called in; `--arping` also asks the hosts whether they are powered on |
@@ -421,7 +421,24 @@ installation.
   silently uses 60 s outside those ranges, so a countdown below a minute
   cannot be configured.
 * **History**: `taskLog` gets a row when a task goes In-Progress and one
-  when it completes; `history` shows those as start and end.
+  when it completes, but neither carries the time of the state change:
+  FOG writes both rows with the *task's creation time*
+  (`taskLog()` in `lib/reg-task/taskingelement.class.php`). Read as
+  start and end, every task in it lasts zero seconds, which is what
+  `history` used to show. So `history` takes the start from
+  `tasks.taskCheckIn` -- written once, when the host takes the task --
+  and the end from the `imagingLog` row a deploy or capture writes
+  itself, paired with the task by host and start time, the way FOG's own
+  host history page does it. `taskLog` is still read for the one thing
+  it does say: *that* the host reported the end (see
+  [closed by server](#the-multicast-manager-ends-a-session-too-early)).
+  A task that writes no imaging run -- an inventory, a wipe, a snapin
+  job -- therefore has a start and a `reported, no end time logged`,
+  because that is all the database holds; for snapins the times are in
+  `pyfog snapins`. Snapin jobs also have no start: the FOG client
+  overwrites `taskCheckIn` on every contact
+  (`lib/client/snapinclient.class.php`), so for them it is the last
+  report, not the beginning.
 * **Snapins**: `snapinTasks` holds state, exit code and the details
   string per snapin per job; exit code 0 on a completed task counts as ok.
 * **Deployments** are `imagingLog` rows; `ilType` `down` is a deploy,

@@ -516,6 +516,83 @@ class SenderMatchingTests(unittest.TestCase):
         self.assertIsNone(session["wrapper_alive"])
 
 
+class HistoryTests(unittest.TestCase):
+    """Where the start and the end of a finished task come from.
+
+    FOG stamps both of its taskLog rows with the task's creation time, so
+    a task read out of taskLog always looks instantaneous. The real times
+    are the host's check-in and, for a deploy or capture, the host's own
+    imagingLog row.
+    """
+
+    class FakeDB(object):
+        def __init__(self, rows):
+            self.rows, self.sql = rows, None
+
+        def query(self, sql, params=()):
+            if "globalSettings" in sql:
+                return []
+            self.sql = sql
+            return self.rows
+
+        def one(self, sql, params=()):
+            return {"utc": rows_dt("2026-09-05 21:40:00"), "db": None, "fog": None}
+
+    def row(self, **kw):
+        base = {"taskID": 321, "taskName": "Capture - LehrerPC100", "taskStateID": 4,
+                "stateName": "Complete", "taskTypeID": 2, "typeName": "Capture",
+                "taskHostID": 7, "hostName": "LehrerPC100", "hostIP": "10.0.0.100",
+                "mac": "00:11:22:33:44:07", "imageID": 6, "imageName": "WS20260904_06",
+                "taskPCT": 100, "taskBPM": "", "taskTimeElapsed": "", "taskTimeRemaining": "",
+                "taskDataCopied": "", "taskDataTotal": "", "nodeName": "fog", "msID": None,
+                "taskCreateTime": rows_dt("2026-09-05 21:16:00"),
+                "taskCheckIn": rows_dt("2026-09-05 21:18:00"),
+                "taskCreateBy": "fog", "taskScheduledStartTime": None,
+                "taskForce": "0", "taskIsDebug": "0", "taskShutdown": "0", "taskWOL": "0",
+                "completeRows": 1, "imagingStart": rows_dt("2026-09-05 21:18:00"),
+                "finished": rows_dt("2026-09-05 21:28:00")}
+        base.update(kw)
+        db = self.FakeDB([base])
+        self.db = db
+        return fog.Fog(db, None).history()[0]
+
+    def test_a_capture_lasts_as_long_as_its_imaging_run(self):
+        entry = self.row()
+        self.assertEqual((entry["started"], entry["finished"]),
+                         ("2026-09-05 21:18:00", "2026-09-05 21:28:00"))
+        self.assertEqual(entry["duration"], 600)
+        self.assertTrue(entry["reported"])
+        # The times taskLog holds are the task's creation time; asking it
+        # for a duration is what made every task last zero seconds.
+        self.assertNotIn("MIN(createTime)", self.db.sql)
+
+    def test_a_task_that_writes_no_imaging_run_has_a_start_but_no_end(self):
+        entry = self.row(taskID=317, taskTypeID=10, typeName="Hardware Inventory",
+                         imagingStart=None, finished=None)
+        self.assertEqual(entry["started"], "2026-09-05 21:18:00")
+        self.assertIsNone(entry["finished"])
+        self.assertIsNone(entry["duration"])
+        self.assertTrue(entry["reported"])
+        out = _Buffer()
+        render.history([entry], render.Palette(False), out)
+        self.assertIn("reported, no end time logged", out.text)
+
+    def test_the_server_closing_a_task_still_reads_as_that(self):
+        entry = self.row(taskTypeID=8, typeName="Multi-Cast", completeRows=0, finished=None)
+        self.assertFalse(entry["reported"])
+        out = _Buffer()
+        render.history([entry], render.Palette(False), out)
+        self.assertIn("closed by server, last report 2026-09-05 21:18", out.text)
+
+    def test_a_snapin_job_has_no_start_because_its_check_in_keeps_moving(self):
+        # The FOG client writes taskCheckIn again on every contact, so for
+        # a snapin job it is the last report and not the start.
+        entry = self.row(taskID=319, taskTypeID=13, typeName="Single Snapin",
+                         imagingStart=None, finished=None)
+        self.assertIsNone(entry["started"])
+        self.assertEqual(entry["last_checkin"], "2026-09-05 21:18:00")
+
+
 class GroupingTests(unittest.TestCase):
     def test_multicast_rows_fold_into_one_entry(self):
         tasks = [_task(id=1, state="In-Progress", percent=30),

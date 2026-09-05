@@ -533,14 +533,19 @@ def history(data, palette, out=sys.stdout, expand=False, sort=None):
 
 
 def _finished(task, palette):
-    """FOG logs no time for a cancellation, and none for a task the server
-    closed itself, so the last sign of life stands in."""
+    """A finish time exists only where the host wrote one: the imagingLog
+    row of a deploy or capture. For everything else -- a cancellation, a
+    task the server closed itself, an inventory or a snapin job, which
+    report that they are done but not when -- the last sign of life
+    stands in."""
     if task["finished"]:
         return short_dt(task["finished"])
     last = short_dt(task["last_checkin"]) if task["last_checkin"] else None
-    if task["result"] == "ok":
-        return palette.dim("closed by server" + (", last report " + last if last else ""))
-    return palette.dim("silent since " + last if last else "never checked in")
+    if task["result"] != "ok":
+        return palette.dim("silent since " + last if last else "never checked in")
+    if task.get("reported"):
+        return palette.dim("reported, no end time logged")
+    return palette.dim("closed by server" + (", last report " + last if last else ""))
 
 
 def scheduled(data, palette, out=sys.stdout, sort=None):
