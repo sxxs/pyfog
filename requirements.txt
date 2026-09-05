@@ -1,0 +1,9 @@
+# pyfog has no Python package dependencies; the standard library is enough.
+#
+# System requirements:
+#   python3 >= 3.6
+#   mysql or mariadb client binary (package mariadb-client / mysql-client),
+#   which FOG's own installer already pulls in
+#
+# Optional, for development:
+#   pyflakes

@@ -48,7 +48,9 @@ pc04  10.0.0.14  Win11-Lab  deploy  2026-09-05 08:25:55  41m 46s  none (FOG lost
 ## Installation
 
 Copy the directory onto the FOG server and run `bin/pyfog`, or
-`python3 -m pyfog` from inside it. Credentials are read from FOG's own
+`python3 -m pyfog` from inside it. `pip install .` installs a `pyfog`
+command instead. There are no Python dependencies (`requirements.txt`
+lists the system requirements). Credentials are read from FOG's own
 `lib/fog/config.class.php` (falling back to `/opt/fog/.fogsettings`), so
 run it as root or as a user that may read that file. Alternatives:
 `--config PATH`, `--db-host/--db-name/--db-user/--db-password`, or the
