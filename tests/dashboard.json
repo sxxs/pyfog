@@ -273,22 +273,44 @@
       "state_id": 3,
       "active": true,
       "port": 63100,
+      "clients_in_session": 3,
       "clients_expected": 3,
-      "clients_joined": 3,
       "percent": 30,
       "started": "2026-09-05 11:54:23",
       "completed": null,
       "storage_group": "default",
       "interface": "eth0",
-      "sender_pid": null,
+      "sender_pid": 4711,
       "sender_node": "DefaultMember",
       "sender_address": "127.0.0.1",
       "sender_started": "2026-09-05 11:54:23",
       "sender_local": true,
-      "wrapper_alive": null,
-      "senders": [],
+      "wrapper_alive": true,
+      "senders": [
+        {
+          "pid": 4712,
+          "portbase": 63100,
+          "min_receivers": 3,
+          "file": "/images/win11lab/d1p1.img",
+          "started": "2026-09-05 11:54:25"
+        }
+      ],
       "participants": null,
-      "log": null
+      "log": {
+        "path": "/opt/fog/log/multicast.log.udpcast.1",
+        "receivers": [
+          "10.0.0.11",
+          "10.0.0.12"
+        ],
+        "phase": "transferring",
+        "last_line": "bytes= 6 442 450 944  re-xmits=0000000"
+      },
+      "rate": {
+        "interface": "eth0",
+        "seconds": 3.0,
+        "rx": 2048.0,
+        "tx": 125829120.0
+      }
     }
   ],
   "orphan_senders": [],
@@ -423,6 +445,14 @@
       "target": "pc02",
       "target_kind": "host",
       "image": "Win11-Lab"
+    }
+  ],
+  "network": [
+    {
+      "interface": "eth0",
+      "seconds": 3.0,
+      "rx": 2048.0,
+      "tx": 125829120.0
     }
   ]
 }

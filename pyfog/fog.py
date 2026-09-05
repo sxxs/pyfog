@@ -57,12 +57,12 @@ LEFT JOIN nfsGroupMembers sn ON sn.ngmID = t.taskNFSMemberID
 """
 
 SESSION_SQL = """
-SELECT ms.msID, ms.msName, ms.msBasePort, ms.msClients, ms.msPercent, ms.msState,
+SELECT ms.msID, ms.msName, ms.msBasePort, ms.msSessClients, ms.msPercent, ms.msState,
        ts.tsName AS stateName, ms.msStartDateTime, ms.msCompleteDateTime,
        ms.msSenderPID, ms.msSenderNode, ms.msSenderStart, ms.msInterface,
        i.imageName, ng.ngName AS groupName,
        sn.ngmMemberName AS nodeName, sn.ngmHostname AS nodeAddress,
-       (SELECT COUNT(*) FROM multicastSessionsAssoc a WHERE a.msID = ms.msID) AS joined
+       (SELECT COUNT(*) FROM multicastSessionsAssoc a WHERE a.msID = ms.msID) AS inSession
 FROM multicastSessions ms
 LEFT JOIN images i ON i.imageID = ms.msImage
 LEFT JOIN taskStates ts ON ts.tsID = ms.msState
@@ -102,6 +102,7 @@ class Fog(object):
         self._utc_now = None
         self._now_source = None
         self._settings = None
+        self._network = None
 
     # -- reference facts ----------------------------------------------------
 
@@ -382,9 +383,41 @@ class Fog(object):
             },
         } for r in rows]
 
+    # -- network ------------------------------------------------------------
+
+    def network(self, busy):
+        """Interface throughput, measured once per snapshot.
+
+        Only while hosts are imaging. The first reading in a process has
+        nothing to compare against and costs a second of wall clock
+        (local.throughput), which is not worth spending on a server where
+        nothing is being deployed or captured; a quiet call therefore
+        neither measures nor remembers, so the busy call that follows it in
+        the same snapshot still takes its reading.
+        """
+        if not busy or self._network is not None:
+            return self._network or []
+        self._network = local.throughput()
+        return self._network
+
     # -- multicast ----------------------------------------------------------
 
     def _session(self, row):
+        """One session row.
+
+        Neither count here is "how many hosts are receiving": the database
+        does not know that, only the udpcast log does. `clients_in_session`
+        is the rows in multicastSessionsAssoc, that is the tasks linked to
+        the session -- queued upfront for a group deploy, added as they
+        arrive for a named session hosts join from the PXE menu.
+        `clients_expected` is the --min-receivers the multicast manager
+        computes from them, max(linked tasks, msSessClients)
+        (lib/service/multicasttask.class.php), so the sender holds for
+        stragglers a named session was sized for. msClients is deliberately
+        not read: it is a marker, not a count -- -2 for a named session, 0
+        once one is finished (lib/service/multicastmanager.class.php), and
+        left at 0 for the ordinary group deploy that owns most sessions.
+        """
         return {
             "id": row["msID"],
             "name": row["msName"],
@@ -393,8 +426,8 @@ class Fog(object):
             "state_id": row["msState"],
             "active": row["msState"] in ACTIVE_STATES,
             "port": row["msBasePort"],
-            "clients_expected": row["msClients"],
-            "clients_joined": row["joined"],
+            "clients_in_session": row["inSession"],
+            "clients_expected": max(row["inSession"], int(row["msSessClients"] or 0)),
             "percent": row["msPercent"],
             "started": dt_text(row["msStartDateTime"]),
             "completed": dt_text(row["msCompleteDateTime"]),
@@ -434,12 +467,21 @@ class Fog(object):
 
         log_dir = (self.setting("SERVICE_LOG_PATH") or "/opt/fog/log").rstrip("/")
         log_name = self.setting("MULTICASTLOGFILENAME") or "multicast.log"
+        # A running sender is the one case where the traffic is certainly
+        # the imaging: it has a file open and is pushing it at the wire.
+        rates = self.network(any(s["active"] and s["senders"] for s in shown))
         for session in shown:
             session["participants"] = self._participants(session["id"]) if participants else None
             session["log"] = local.udpcast_log("%s/%s.udpcast.%s" % (log_dir, log_name, session["id"])) \
                 if session["sender_local"] else None
+            # FOG stores the interface it told udp-sender to send on, so
+            # the rate shown under a session is that interface's, not
+            # whatever else the machine happens to be doing.
+            session["rate"] = next((r for r in rates if r["interface"] == session["interface"]), None) \
+                if session["senders"] else None
         return {
             "sessions": shown,
+            "network": rates,
             "orphan_senders": [s for pid, s in senders.items() if pid not in claimed],
             "udp_sender_path": self.settings.values.get("UDPSENDERPATH"),
         }
@@ -492,7 +534,49 @@ class Fog(object):
             })
         out.sort(key=lambda e: (e["age"] is None, e["age"] or 0))
         return {"hosts": out, "logs": [p for p in paths if p not in unreadable],
-                "logs_unreadable": unreadable, "now": dt_text(now)}
+                "logs_unreadable": unreadable, "now": dt_text(now), "probed": False}
+
+    def probe(self, data, timeout=1.0):
+        """Ask the hosts in a clients() result whether they are powered on.
+
+        The one thing FOG cannot tell: its own idea of "seen" is the
+        client calling in, so a machine that is up with a stopped, broken
+        or never-installed FOG client is indistinguishable from one that
+        is off. ARP is answered by the network stack, so it does not care
+        what runs on the host.
+
+        Asked at the address the kernel last saw the MAC at, and only at
+        hosts.hostIP when the ARP cache has nothing on it -- FOG's record
+        can be years out of date. The answering MAC is compared with the
+        host's, so a reply from whoever holds that address today is not
+        read as this host being up. Unlike everything else pyfog does this
+        puts packets on the network: one ARP request per host, and only
+        when asked for.
+        """
+        cache = local.neighbours()
+        fallback = local.default_interface()
+        targets, asked = [], {}
+        for host in data["hosts"]:
+            mac = normalize_mac(host["mac"])
+            known = cache.get(mac) or {}
+            ip = known.get("ip") or host["ip"] or None
+            host["live"] = {"up": None, "ip": ip, "how": None,
+                            "mac_seen": None, "error": None}
+            if ip:
+                targets.append((ip, known.get("device") or fallback))
+                asked.setdefault(ip, []).append((host, mac))
+        answers = local.arping(targets, timeout)
+        errors = []
+        for ip, (seen, error) in answers.items():
+            for host, mac in asked[ip]:
+                host["live"].update(how="arping", error=error,
+                                    mac_seen=pretty_mac(seen) if seen else None,
+                                    up=None if error else (seen == mac))
+            if error and error not in errors:
+                errors.append(error)
+        data["probed"] = True
+        data["probe_error"] = errors[0] if errors else None
+        return data
 
     # -- deployments and images ---------------------------------------------
 
@@ -813,9 +897,20 @@ class Fog(object):
             "imaging_open": self.imaging_open(),
             "sessions": multicast["sessions"],
             "orphan_senders": multicast["orphan_senders"],
+            "network": self.network(imaging_now(tasks)),
             "recent": group_multicast(self.history(limit=recent)),
             "scheduled": [s for s in self.scheduled() if s["active"]],
         }
+
+
+def imaging_now(tasks):
+    """Is a host actually moving an image right now?
+
+    Checked-in counts: a multicast task never advances past it (the
+    session, not the task, carries the progress), so waiting for
+    In-Progress would miss every multicast deploy there is.
+    """
+    return any(t["state_id"] in (CHECKED_IN, IN_PROGRESS) for t in tasks)
 
 
 def match_senders(sessions, procs, senders, here):

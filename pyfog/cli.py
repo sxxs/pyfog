@@ -80,6 +80,12 @@ def build_parser():
                    help="how much of each log's tail to read")
     p.add_argument("--stale", type=int, metavar="MINUTES", help="mark hosts silent for longer than MINUTES")
     p.add_argument("--only-stale", action="store_true", help="with --stale: list only the hosts marked silent")
+    p.add_argument("--watch", type=int, metavar="SECONDS",
+                   help="refresh every N seconds; re-reads the access log every round")
+    p.add_argument("--arping", action="store_true",
+                   help="ask each host on the wire whether it is powered on (sends ARP requests)")
+    p.add_argument("--arping-timeout", type=float, default=1.0, metavar="SECONDS",
+                   help="how long to wait for each ARP reply (default 1)")
 
     p = sub.add_parser("deployments", help="imaging log: who got which image when")
     p.add_argument("--host")
@@ -110,6 +116,11 @@ def build_parser():
                    help="seconds between refreshes (default 3)")
     p.add_argument("--once", action="store_true",
                    help="print one screen and exit (implied when the output is not a terminal)")
+    p.add_argument("--arping", action="store_true",
+                   help="in the clients view (key c): ask the hosts whether they are "
+                        "powered on; the key a toggles it while the screen is up")
+    p.add_argument("--arping-timeout", type=float, default=1.0, metavar="SECONDS",
+                   help="how long to wait for each ARP reply (default 1)")
     p.add_argument("--recent", type=int, default=8, metavar="N",
                    help="how many finished tasks to list (default 8)")
     return parser
@@ -139,7 +150,8 @@ def collect(api, args):
         tasks = api.tasks(parse_states(args.state), args.host, args.image, args.type, args.limit)
         data = {"count": len(tasks), "entries": fog.group_multicast(tasks),
                 "now": fog.dt_text(api.now()), "timeout": api.checkin_timeout(),
-                "imaging_open": api.imaging_open()}
+                "imaging_open": api.imaging_open(),
+                "network": api.network(fog.imaging_now(tasks))}
         return data, render.tasks, {"expand": args.expand}
     if args.command == "task":
         data = api.task(args.id)
@@ -158,6 +170,10 @@ def collect(api, args):
         stale = args.stale * 60 if args.stale else None
         if stale and args.only_stale:
             data["hosts"] = [h for h in data["hosts"] if h["age"] is None or h["age"] > stale]
+        if args.arping:
+            # After the filtering: --only-stale is the case worth probing,
+            # and the hosts it dropped are not worth a packet.
+            api.probe(data, args.arping_timeout)
         return data, render.clients, {"stale_after": stale}
     if args.command == "deployments":
         if args.current:
@@ -226,14 +242,22 @@ def main(argv=None):
             db.close()
 
 
-def view_args(args, command):
-    """Arguments for another command's view, with this run's global options."""
+def view_args(args, command, arping=None):
+    """Arguments for another command's view, with this run's global options.
+
+    `arping` is the live screen's own switch (the key a), which outlives
+    leaving the clients view and coming back to it; without one the view
+    starts the way the command line asked for it.
+    """
     view = build_parser().parse_args([command])
     for name in ("json", "no_color", "debug", "config", "db_host", "db_name", "db_user",
                  "db_password"):
         setattr(view, name, getattr(args, name))
     if command == "tasks":
         view.expand = True
+    if hasattr(view, "arping"):
+        view.arping = getattr(args, "arping", False) if arping is None else arping
+        view.arping_timeout = getattr(args, "arping_timeout", 1.0)
     return view
 
 
@@ -324,9 +348,10 @@ def watch(args, settings, db, palette, interval):
     home = current = args
     body, sort, skip = "", render.Sort(), 0
     views = dict(VIEWS)
-    accept = set(views) | set(SCROLL) | {"q", "x", "esc", "<", ">", ",", ".", "r"}
+    probe = getattr(args, "arping", False)
+    accept = set(views) | set(SCROLL) | {"q", "x", "esc", "<", ">", ",", ".", "r", "a"}
     key_line = "  ".join("%s %s" % (key, name) for key, name in VIEWS) \
-        + "  x back  q quit  < > r sort  j k PgUp PgDn Home End scroll"
+        + "  a arp  x back  q quit  < > r sort  j k PgUp PgDn Home End scroll"
     try:
         with Keys(enabled=live) as keys:
             while True:
@@ -356,12 +381,15 @@ def watch(args, settings, db, palette, interval):
                     sys.stdout.flush()
                     keys.read(interval - (time.monotonic() - started), accept)
                     continue
+                # The probe costs a second of every round, so the screen
+                # says when it is on rather than leaving that to the table.
+                name = current.command + (" arp" if getattr(current, "arping", False) else "")
                 if error is None:
                     status = "pyfog %s  refreshed %s in %d ms, every %ds" % (
-                        current.command, stamp, (time.monotonic() - started) * 1000, interval)
+                        name, stamp, (time.monotonic() - started) * 1000, interval)
                 else:
                     status = "pyfog %s  %s  %s, retrying every %ds" % (
-                        current.command, stamp, error, interval)
+                        name, stamp, error, interval)
                 head = 2 if keys.enabled else 1
                 # Two passes: the status line names the lines on screen, and
                 # only frame() knows them.
@@ -384,7 +412,13 @@ def watch(args, settings, db, palette, interval):
                 if key in ("x", "esc"):
                     current, sort, skip = home, render.Sort(), 0
                 elif key in views:
-                    current, sort, skip = view_args(args, views[key]), render.Sort(), 0
+                    current, sort, skip = view_args(args, views[key], probe), render.Sort(), 0
+                elif key == "a":
+                    # Only the clients view asks anything of the network;
+                    # elsewhere the key is remembered and does nothing yet.
+                    probe = not probe
+                    if hasattr(current, "arping"):
+                        current.arping = probe
                 elif key in ("<", ","):
                     sort.move(-1)
                 elif key in (">", "."):

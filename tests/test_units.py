@@ -276,6 +276,217 @@ class ClientSettingsTests(unittest.TestCase):
         self.assertEqual(c["sleep_sent"], (21, 31))
         self.assertEqual(c["sleep_effective"], (60, 31))
 
+class _Clock(object):
+    """time.monotonic and time.sleep, on rails."""
+
+    def __init__(self, *ticks):
+        self.ticks, self.slept = list(ticks), []
+
+    def monotonic(self):
+        return self.ticks.pop(0)
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+
+
+class ThroughputTests(unittest.TestCase):
+    def setUp(self):
+        self.real_bytes, self.real_time = local.interface_bytes, local.time
+        local._last_bytes = None
+
+    def tearDown(self):
+        local.interface_bytes, local.time = self.real_bytes, self.real_time
+        local._last_bytes = None
+
+    def readings(self, *counters):
+        counters = list(counters)
+        local.interface_bytes = lambda: counters.pop(0)
+
+    def test_proc_net_dev_columns(self):
+        path = os.path.join(tempfile.mkdtemp(), "dev")
+        with open(path, "w") as fh:
+            fh.write("Inter-|   Receive                    |  Transmit\n"
+                     " face |bytes packets errs drop fifo frame compressed multicast|"
+                     "bytes packets errs drop fifo colls carrier compressed\n"
+                     "    lo:  100 1 0 0 0 0 0 0  100 1 0 0 0 0 0 0\n"
+                     "  eth0:4294967296 9 0 0 0 0 0 0 8000 7 0 0 0 0 0 0\n")
+        local.interface_bytes = self.real_bytes
+        local.NET_DEV, old = path, local.NET_DEV
+        try:
+            self.assertEqual(local.interface_bytes(),
+                             {"lo": (100, 100), "eth0": (4294967296, 8000)})
+        finally:
+            local.NET_DEV = old
+        shutil.rmtree(os.path.dirname(path))
+
+    def test_a_one_shot_call_takes_its_own_second_reading(self):
+        self.readings({"eth0": (0, 0)}, {"eth0": (1024, 10 * 1024)})
+        local.time = _Clock(100.0, 102.0)
+        rates = local.throughput(sample=1.0)
+        self.assertEqual(local.time.slept, [1.0])
+        self.assertEqual(rates, [{"interface": "eth0", "seconds": 2.0,
+                                  "rx": 512.0, "tx": 5120.0}])
+
+    def test_a_watch_loop_measures_between_two_redraws(self):
+        self.readings({"eth0": (0, 0)}, {"eth0": (0, 0)}, {"eth0": (0, 3000)})
+        local.time = _Clock(100.0, 100.5)  # the first call has nothing to compare
+        local.throughput(sample=0)
+        local.time = _Clock(103.0)         # 2.5 s since the last redraw
+        rates = local.throughput(sample=1.0)
+        self.assertEqual(local.time.slept, [])
+        self.assertEqual(rates[0]["tx"], 1200.0)
+
+    def test_loopback_wrapped_counters_and_new_interfaces_are_left_out(self):
+        self.readings({"lo": (0, 0), "eth0": (500, 0), "eth1": (900, 0)},
+                      {"lo": (10 ** 9, 0), "eth0": (100, 0), "eth1": (1900, 0),
+                       "eth2": (10 ** 6, 0)})
+        local.time = _Clock(100.0, 101.0)
+        rates = local.throughput(sample=0)
+        self.assertEqual([r["interface"] for r in rates], ["eth1"])
+
+    def test_quiet_machine_is_not_measured_at_all(self):
+        self.readings()  # a reading would raise IndexError
+        self.assertEqual(fog.Fog(None, None).network(busy=False), [])
+
+    def test_imaging_now_counts_checked_in(self):
+        self.assertTrue(fog.imaging_now([{"state_id": fog.CHECKED_IN}]))
+        self.assertTrue(fog.imaging_now([{"state_id": fog.IN_PROGRESS}]))
+        self.assertFalse(fog.imaging_now([{"state_id": fog.QUEUED},
+                                          {"state_id": fog.COMPLETE}]))
+
+
+class _Proc(object):
+    """What subprocess.Popen gives back, without the process."""
+
+    def __init__(self, text, returncode):
+        self.text, self.returncode = text, returncode
+
+    def communicate(self, timeout=None):
+        return self.text.encode(), b""
+
+
+class ArpTests(unittest.TestCase):
+    def setUp(self):
+        self.real_popen = local.subprocess.Popen
+
+    def tearDown(self):
+        local.subprocess.Popen = self.real_popen
+
+    def answer(self, text, returncode=0):
+        local.subprocess.Popen = lambda *a, **kw: _Proc(text, returncode)
+
+    def test_arp_cache_skips_the_entries_nobody_answered(self):
+        path = os.path.join(tempfile.mkdtemp(), "arp")
+        with open(path, "w") as fh:
+            fh.write("IP address       HW type     Flags       HW address"
+                     "            Mask     Device\n"
+                     "10.0.0.11        0x1         0x2         00:11:22:33:44:55"
+                     "     *        eth0\n"
+                     "10.0.0.99        0x1         0x0         00:00:00:00:00:00"
+                     "     *        eth0\n")
+        local.PROC_ARP, old = path, local.PROC_ARP
+        try:
+            self.assertEqual(local.neighbours(),
+                             {"001122334455": {"ip": "10.0.0.11", "device": "eth0"}})
+        finally:
+            local.PROC_ARP = old
+        shutil.rmtree(os.path.dirname(path))
+
+    def test_both_arpings_are_read_the_same_way(self):
+        self.answer("ARPING 10.0.0.11 from 10.0.0.1 eth0\n"
+                    "Unicast reply from 10.0.0.11 [00:11:22:33:44:55]  0.700ms\n")
+        self.assertEqual(local.arping_one("10.0.0.11"), ("001122334455", None))
+        self.answer("ARPING 10.0.0.11\n"
+                    "60 bytes from 00:11:22:33:44:55 (10.0.0.11): index=0 time=712.005 usec\n")
+        self.assertEqual(local.arping_one("10.0.0.11"), ("001122334455", None))
+
+    def test_silence_is_not_an_error_but_a_refusal_is(self):
+        self.answer("ARPING 10.0.0.11\nTimeout\n", returncode=1)
+        self.assertEqual(local.arping_one("10.0.0.11"), (None, None))
+        self.answer("arping: socket: Operation not permitted\n", returncode=2)
+        self.assertEqual(local.arping_one("10.0.0.11"),
+                         (None, "arping: socket: Operation not permitted"))
+
+    def test_a_missing_arping_is_reported_once_not_guessed_at(self):
+        def missing(*a, **kw):
+            raise OSError(2, "No such file or directory")
+        local.subprocess.Popen = missing
+        mac, error = local.arping_one("10.0.0.11")
+        self.assertIsNone(mac)
+        self.assertIn("No such file", error)
+
+
+class ProbeTests(unittest.TestCase):
+    def setUp(self):
+        self.real = (local.neighbours, local.default_interface, local.arping)
+
+    def tearDown(self):
+        local.neighbours, local.default_interface, local.arping = self.real
+
+    def probe(self, hosts, cache, answers):
+        local.neighbours = lambda: cache
+        local.default_interface = lambda: "eth0"
+        self.asked = []
+
+        def arping(targets, timeout=1.0, workers=32):
+            self.asked = list(targets)
+            return {ip: answers[ip] for ip, _ in targets}
+        local.arping = arping
+        return fog.Fog(None, None).probe({"hosts": hosts})
+
+    def test_the_kernel_knows_a_better_address_than_fogs_record(self):
+        # FOG still has the address from the day the host was registered;
+        # the ARP cache has where it answered from last.
+        hosts = [{"mac": "00:11:22:33:44:55", "ip": "10.0.0.11"}]
+        data = self.probe(hosts, {"001122334455": {"ip": "10.0.0.77", "device": "eth1"}},
+                          {"10.0.0.77": ("001122334455", None)})
+        self.assertEqual(self.asked, [("10.0.0.77", "eth1")])
+        self.assertEqual(hosts[0]["live"]["up"], True)
+        self.assertIsNone(data["probe_error"])
+
+    def test_a_reply_from_a_different_machine_is_not_this_host(self):
+        hosts = [{"mac": "00:11:22:33:44:55", "ip": "10.0.0.11"}]
+        self.probe(hosts, {}, {"10.0.0.11": ("aabbccddeeff", None)})
+        self.assertEqual(hosts[0]["live"]["up"], False)
+        self.assertEqual(hosts[0]["live"]["mac_seen"], "aa:bb:cc:dd:ee:ff")
+
+    def test_no_address_and_no_answer_are_told_apart(self):
+        hosts = [{"mac": "00:11:22:33:44:55", "ip": None},
+                 {"mac": "aa:bb:cc:dd:ee:ff", "ip": "10.0.0.12"},
+                 {"mac": "00:00:00:00:00:01", "ip": "10.0.0.13"}]
+        data = self.probe(hosts, {}, {"10.0.0.12": (None, None),
+                                      "10.0.0.13": (None, "arping: not permitted")})
+        self.assertEqual([h["live"]["how"] for h in hosts], [None, "arping", "arping"])
+        self.assertEqual([h["live"]["up"] for h in hosts], [None, False, None])
+        self.assertEqual(data["probe_error"], "arping: not permitted")
+
+
+class SessionRowTests(unittest.TestCase):
+    def row(self, **kw):
+        base = {"msID": 5, "msName": "Multi-Cast Task - CPR_3", "imageName": "WS20260904_05",
+                "stateName": "In-Progress", "msState": 3, "msBasePort": 63100,
+                "inSession": 34, "msSessClients": 0, "msPercent": 0,
+                "msStartDateTime": rows_dt("2026-09-05 16:09:10"),
+                "msCompleteDateTime": None, "groupName": "default", "msInterface": "eth0",
+                "msSenderPID": 293521, "nodeName": "fog", "nodeAddress": "fog.example",
+                "msSenderStart": rows_dt("2026-09-05 16:09:13")}
+        base.update(kw)
+        return fog.Fog(None, None)._session(base)
+
+    def test_the_assoc_rows_are_the_session_not_the_receivers(self):
+        # 34 tasks linked to the session, nobody on the wire yet: the count
+        # is what FOG queued, and msClients stays 0 for a group deploy.
+        s = self.row()
+        self.assertEqual(s["clients_in_session"], 34)
+        self.assertEqual(s["clients_expected"], 34)
+
+    def test_a_named_session_waits_for_the_size_it_was_given(self):
+        # Hosts join a named session from the PXE menu, so the assoc rows
+        # trail msSessClients until the last straggler has arrived.
+        s = self.row(inSession=2, msSessClients=5)
+        self.assertEqual((s["clients_in_session"], s["clients_expected"]), (2, 5))
+
+
 class SenderMatchingTests(unittest.TestCase):
     def session(self, **kw):
         base = {"id": 1, "active": True, "port": 63100, "sender_pid": 50,
@@ -335,6 +546,19 @@ class CliTests(unittest.TestCase):
         self.assertEqual((view.command, view.expand, view.no_color, view.db_host),
                          ("tasks", True, True, "x"))
         self.assertEqual(cli.view_args(args, "clients").command, "clients")
+
+    def test_the_clients_view_inherits_the_probe_and_the_key_toggles_it(self):
+        plain = cli.build_parser().parse_args(["dashboard"])
+        probing = cli.build_parser().parse_args(["dashboard", "--arping",
+                                                 "--arping-timeout", "2"])
+        self.assertFalse(cli.view_args(plain, "clients").arping)
+        view = cli.view_args(probing, "clients")
+        self.assertEqual((view.arping, view.arping_timeout), (True, 2.0))
+        # The key a is the live screen's own switch, so it wins over both.
+        self.assertTrue(cli.view_args(plain, "clients", True).arping)
+        self.assertFalse(cli.view_args(probing, "clients", False).arping)
+        # A view that cannot probe is left alone rather than given the flag.
+        self.assertFalse(hasattr(cli.view_args(probing, "tasks"), "arping"))
         self.assertEqual(sorted(name for _, name in cli.VIEWS),
                          sorted(("tasks", "multicast", "history", "scheduled", "clients",
                                  "deployments", "images", "hosts", "groups", "snapins", "info")))
@@ -375,6 +599,52 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(render.age_text(3661), "1h 01m")
         self.assertEqual(render.age_text(None), "-")
 
+    def test_clients_line_never_claims_receivers(self):
+        self.assertEqual(render._clients({"clients_in_session": 34, "clients_expected": 34}),
+                         "34 in session")
+        self.assertEqual(render._clients({"clients_in_session": 2, "clients_expected": 5}),
+                         "2 in session of 5 the sender waits for")
+
+    def test_arp_column_says_which_kind_of_silence_it_is(self):
+        plain = render.Palette(False)
+        self.assertEqual(render.arp_text({"how": "arping", "up": True, "error": None,
+                                          "mac_seen": "00:11:22:33:44:55"}, plain), "up")
+        self.assertEqual(render.arp_text({"how": "arping", "up": False, "error": None,
+                                          "mac_seen": "aa:bb:cc:dd:ee:ff"}, plain), "other host")
+        self.assertEqual(render.arp_text({"how": "arping", "up": False, "error": None,
+                                          "mac_seen": None}, plain), "silent")
+        self.assertEqual(render.arp_text({"how": "arping", "up": None,
+                                          "error": "no permission", "mac_seen": None}, plain), "?")
+        self.assertEqual(render.arp_text({"how": None, "up": None, "error": None,
+                                          "mac_seen": None}, plain), "-")
+        self.assertEqual(render.arp_text(None, plain), "-")
+
+    def test_arp_column_appears_only_when_the_hosts_were_asked(self):
+        host = {"host": "pc01", "ip": "10.0.0.11", "mac": "00:11:22:33:44:55", "image": "Win11",
+                "pending": False, "last_seen": "2026-09-05 12:00:00", "age": 30,
+                "source": "log", "last_call_from": "10.0.0.11"}
+        data = {"logs": ["/var/log/apache2/access.log"], "logs_unreadable": [],
+                "now": "2026-09-05 12:00:30", "hosts": [dict(host)], "probed": False}
+        out = _Buffer()
+        render.clients(data, render.Palette(False), out)
+        self.assertNotIn("ARP", out.text)
+        data["probed"], data["probe_error"] = True, None
+        data["hosts"] = [dict(host, live={"how": "arping", "up": True, "error": None,
+                                          "mac_seen": "00:11:22:33:44:55"})]
+        out = _Buffer()
+        render.clients(data, render.Palette(False), out)
+        self.assertIn("ARP", out.text.splitlines()[1])
+        self.assertIn("up", out.text.splitlines()[2])
+
+    def test_network_line_names_both_directions(self):
+        rate = {"interface": "eth0", "rx": 2 * 1024, "tx": 120 * 1024 * 1024, "seconds": 3.0}
+        self.assertEqual(render.network_text([rate]),
+                         "eth0  out 120.0 MiB/s  in 2.0 KiB/s  (3.0s sample)")
+        quiet = {"interface": "eth1", "rx": 10, "tx": 10, "seconds": 3.0}
+        # Nothing is moving, but the line stays: one interface, the busiest.
+        self.assertEqual(render.network_text([quiet]).split()[0], "eth1")
+        self.assertIsNone(render.network_text([]))
+
     def test_table_fits_narrow_terminal(self):
         table = render.Table("A", ">B")
         table.add("x" * 300, 1)
@@ -388,6 +658,9 @@ class RenderTests(unittest.TestCase):
         out = _Buffer()
         render.dashboard(data, render.Palette(False), out)
         for expected in ("Active tasks: 6", "1 stale", "1 imaging run without a task",
+                         "Network  eth0  out 120.0 MiB/s  in 2.0 KiB/s  (3.0s sample)",
+                         "Throughput     eth0  out 120.0 MiB/s",
+                         "udp-sender pid 4712", "udpcast log: transferring, 2 receivers connected",
                          "MC1", "Multicast session 1", "Recently finished tasks", "Scheduled tasks"):
             self.assertIn(expected, out.text)
 

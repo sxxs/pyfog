@@ -44,9 +44,13 @@ INSERT INTO tasks (taskID,taskName,taskCreateTime,taskCheckIn,taskHostID,taskIma
  (9,'Multi-Cast - Lab-A',NOW()-INTERVAL 45 MINUTE,NOW()-INTERVAL 35 MINUTE,4,1,4,'admin','0','0000-00-00 00:00:00',8,97,'0.9','00:05:00','00:00:10','21.8GB','22.5GB',1,1,'0');
 -- msSenderPID 0: no sender process to look for. Set it to the pid of a
 -- running /bin/sh with udp-sender children to exercise the process check.
-INSERT INTO multicastSessions (msID,msName,msBasePort,msLogPath,msImage,msClients,msInterface,msStartDateTime,msPercent,msState,msCompleteDateTime,msNFSGroupID,msSenderPID,msSenderNode,msSenderStart) VALUES
- (1,'Multi-Cast - Lab-A',63100,'/images/win11lab','1',3,'eth0',NOW()-INTERVAL 8 MINUTE,30,3,'0000-00-00 00:00:00',1,0,1,NOW()-INTERVAL 8 MINUTE),
- (2,'Multi-Cast - old',63102,'/images/win11lab','1',2,'eth0',NOW()-INTERVAL 5 DAY,100,4,NOW()-INTERVAL 5 DAY+INTERVAL 20 MINUTE,1,0,0,NOW()-INTERVAL 5 DAY);
+-- msClients is a marker, not a count: 0 for the ordinary group deploy of
+-- registered hosts, -2 while a named session takes unregistered clients,
+-- 0 again once one is finished. The number of hosts is the assoc rows
+-- below; msSessClients only sizes a named session.
+INSERT INTO multicastSessions (msID,msName,msBasePort,msLogPath,msImage,msClients,msSessClients,msInterface,msStartDateTime,msPercent,msState,msCompleteDateTime,msNFSGroupID,msSenderPID,msSenderNode,msSenderStart) VALUES
+ (1,'Multi-Cast - Lab-A',63100,'/images/win11lab','1',0,0,'eth0',NOW()-INTERVAL 8 MINUTE,30,3,'0000-00-00 00:00:00',1,0,1,NOW()-INTERVAL 8 MINUTE),
+ (2,'Multi-Cast - old',63102,'/images/win11lab','1',0,0,'eth0',NOW()-INTERVAL 5 DAY,100,4,NOW()-INTERVAL 5 DAY+INTERVAL 20 MINUTE,1,0,0,NOW()-INTERVAL 5 DAY);
 INSERT INTO multicastSessionsAssoc (msID,tID) VALUES (1,4),(1,5),(1,6);
 
 -- pc05 finished yesterday; pc01 imaging with a task; pc04 imaging without one

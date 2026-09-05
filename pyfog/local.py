@@ -1,6 +1,8 @@
 """Facts read from the machine pyfog runs on, outside the database.
 
     processes      /proc, to find udp-sender processes and FOG's sh wrappers
+    interfaces     /proc/net/dev, for the throughput while hosts are imaging
+    neighbours     /proc/net/arp and arping, to see which hosts answer on the wire
     access logs    the web server log, to see when a FOG client last called in
     udpcast logs   udp-sender's own output, to see which receivers joined
 """
@@ -10,6 +12,7 @@ import os
 import re
 import socket
 import subprocess
+import time
 from datetime import datetime, timezone
 
 from .util import normalize_mac, to_int
@@ -139,6 +142,179 @@ def _find_local_names():
     except (OSError, subprocess.CalledProcessError):
         pass
     return names
+
+
+# -- interface throughput ---------------------------------------------------
+
+
+NET_DEV = "/proc/net/dev"
+
+# The reading the last call left behind: (monotonic time, counters).
+_last_bytes = None
+
+
+def interface_bytes():
+    """interface -> (received, sent) byte counters since boot."""
+    counters = {}
+    try:
+        with open(NET_DEV) as handle:
+            lines = handle.readlines()[2:]  # two header lines
+    except IOError:
+        return counters  # not Linux, or /proc not mounted
+    for line in lines:
+        name, sep, rest = line.partition(":")
+        fields = rest.split()
+        if not sep or len(fields) < 9:
+            continue
+        try:
+            counters[name.strip()] = (int(fields[0]), int(fields[8]))
+        except ValueError:
+            continue
+    return counters
+
+
+def throughput(sample=1.0, min_gap=0.4, max_gap=60.0):
+    """Bytes per second per interface, busiest first.
+
+    The same numbers `vnstat -l` shows, taken from the same place vnstat
+    takes them: the kernel's counters in /proc/net/dev. Two readings and
+    the time between them are the whole measurement, so nothing has to be
+    installed or kept running for it.
+
+    The previous reading is remembered. `pyfog dashboard` redraws every
+    few seconds, and the gap between two redraws is a longer and steadier
+    sample than anything a single call could take, so a watch loop pays
+    nothing for this. A one-shot command has no reading to compare
+    against, and sleeps `sample` seconds for a second one; a reading older
+    than `max_gap` (a paused watch, a resumed terminal) is treated the
+    same way, because a rate averaged over minutes says nothing about now.
+    """
+    global _last_bytes
+    now = time.monotonic()
+    counters = interface_bytes()
+    if not counters:
+        return []
+    before = _last_bytes
+    _last_bytes = (now, counters)
+    if before is None or not (min_gap <= now - before[0] <= max_gap):
+        before = _last_bytes
+        time.sleep(sample)
+        now, counters = time.monotonic(), interface_bytes()
+        _last_bytes = (now, counters)
+    gap = now - before[0]
+    if gap <= 0:
+        return []
+    rates = []
+    for name, (rx, tx) in sorted(counters.items()):
+        was = before[1].get(name)
+        # Unknown a moment ago (an interface that just came up), or the
+        # counter went backwards: a 32 bit counter wrapped, or the
+        # interface was reset. Either way there is no rate to report.
+        if name == "lo" or was is None or rx < was[0] or tx < was[1]:
+            continue
+        rates.append({"interface": name, "seconds": gap,
+                      "rx": (rx - was[0]) / gap, "tx": (tx - was[1]) / gap})
+    rates.sort(key=lambda r: r["rx"] + r["tx"], reverse=True)
+    return rates
+
+
+# -- who answers on the wire ------------------------------------------------
+
+
+PROC_ARP = "/proc/net/arp"
+
+# Both arpings (iputils and Habets) name the answering MAC in their reply
+# line and nowhere before it: "Unicast reply from 10.0.0.11 [00:11:...]"
+# and "60 bytes from 00:11:... (10.0.0.11)".
+MAC_IN_TEXT = re.compile(r"[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}")
+
+
+def neighbours():
+    """mac -> {"ip", "device"} from the kernel's ARP cache.
+
+    Free, and no packet leaves the machine: this is what the server
+    already knows. Incomplete entries (flags 0x0) are left out -- they are
+    addresses the kernel asked about and got no answer for, which is the
+    opposite of the fact wanted here.
+    """
+    found = {}
+    try:
+        with open(PROC_ARP) as handle:
+            lines = handle.readlines()[1:]  # one header line
+    except IOError:
+        return found
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 6 or fields[2] == "0x0":
+            continue
+        mac = normalize_mac(fields[3])
+        if len(mac) == 12:
+            found[mac] = {"ip": fields[0], "device": fields[5]}
+    return found
+
+
+def default_interface():
+    """The device the default route uses; arping wants one on a server with
+    more than one network."""
+    try:
+        out = subprocess.check_output(["ip", "-o", "route", "show", "default"],
+                                      stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    match = re.search(r"\bdev\s+(\S+)", out.decode("ascii", "replace"))
+    return match.group(1) if match else None
+
+
+def arping_one(ip, interface=None, timeout=1.0):
+    """One ARP request to one address: (answering mac or None, error or None).
+
+    ARP is answered by the network stack itself, so a machine that is on
+    but whose FOG client is not running still replies. It also never
+    leaves the local segment: a host behind a router is silent here no
+    matter how healthy it is.
+    """
+    cmd = ["arping", "-c", "1", "-w", "%d" % max(1, int(round(timeout)))]
+    if interface:
+        cmd += ["-I", interface]
+    cmd.append(ip)
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except OSError as error:
+        return None, "arping: %s" % error.strerror  # not installed
+    try:
+        out = proc.communicate(timeout=timeout + 5)[0]
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        return None, "arping did not return"
+    text = out.decode("utf-8", "replace")
+    match = MAC_IN_TEXT.search(text)
+    if proc.returncode == 0 and match:
+        return normalize_mac(match.group(0)), None
+    if proc.returncode not in (0, 1):
+        # Not "no answer" but a refusal: no permission for a raw socket,
+        # an interface that does not exist, an address it cannot route.
+        return None, text.strip().splitlines()[-1] if text.strip() else "arping failed"
+    return None, None
+
+
+def arping(targets, timeout=1.0, workers=32):
+    """Probe several addresses at once; ip -> (mac or None, error or None).
+
+    targets: [(ip, interface)]. One packet each, `workers` in flight, so a
+    lab of a few hundred hosts is one short burst of ARP rather than one
+    timeout after another.
+    """
+    targets = list(dict.fromkeys(targets))
+    if not targets:
+        return {}
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+    except ImportError:  # pragma: no cover - stdlib since 3.2
+        return {ip: arping_one(ip, iface, timeout) for ip, iface in targets}
+    with ThreadPoolExecutor(max_workers=min(workers, len(targets))) as pool:
+        results = list(pool.map(lambda t: arping_one(t[0], t[1], timeout), targets))
+    return {ip: result for (ip, _), result in zip(targets, results)}
 
 
 # -- web server access log --------------------------------------------------

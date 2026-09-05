@@ -78,7 +78,8 @@ from the GUI at all:
   a session of twenty machines shows up as twenty unrelated rows instead
   of one event with twenty participants.
 * Which hosts have talked to the server recently, and which have gone
-  quiet? FOG keeps no "last seen" column.
+  quiet? FOG keeps no "last seen" column. And of the quiet ones: which
+  are off, and which are running with a broken FOG client?
 * Which image did each machine last receive, and does that match the
   image assigned to it now?
 * What happened yesterday? There is no task history beyond the per-host
@@ -96,7 +97,10 @@ database holds. Design rules, in order:
    hundred lines per module, plain SQL that anyone can check against
    FOG's schema.
 3. **Read only.** Only `SELECT`, through its own database account with
-   `SELECT` on `fog.*`; FOG's own account is never used.
+   `SELECT` on `fog.*`; FOG's own account is never used. Nothing on the
+   network either, with one exception that has to be asked for by name:
+   `pyfog clients --arping` sends ARP requests, because whether a machine
+   is powered on is not a fact any table holds.
 4. **Separate data from display.** `pyfog/fog.py` returns plain dicts,
    the terminal tables are a thin layer on top, and `--json` prints the
    dicts as they are. A read-only web front end can be built on the
@@ -114,7 +118,7 @@ FOG's GUI and API remain the place for that.
 | `pyfog history`           | finished tasks with start/end times from `taskLog`, newest first |
 | `pyfog scheduled`         | delayed and cron tasks FOG will create later                    |
 | `pyfog multicast`         | sessions, participants, the `udp-sender` processes and their udpcast log; orphaned senders |
-| `pyfog clients`           | when each host's FOG client last called in                      |
+| `pyfog clients`           | when each host's FOG client last called in; `--arping` also asks the hosts whether they are powered on |
 | `pyfog deployments`       | imaging log: which host captured or received which image, when  |
 | `pyfog deployments --current` | per host: assigned image versus last deployed image        |
 | `pyfog images`            | image inventory                                                |
@@ -160,7 +164,11 @@ another command's output, refreshed at the same interval, so the other
 commands can be found without remembering their names: `t` tasks (one
 line per host), `m` multicast, `h` history, `s` scheduled, `c` clients,
 `d` deployments, `i` images, `o` hosts, `g` groups, `n` snapins, `f`
-info. `x` or Escape returns to the dashboard, `q` quits. `<` and `>`
+info. `a` switches the ARP probe in the clients view on and off (see [Is
+the machine on?](#is-the-machine-on)); it stays switched for the rest of
+the session, so leaving the view and coming back keeps it, and the status
+line says `pyfog clients arp` while it is on. `x` or Escape returns to
+the dashboard, `q` quits. `<` and `>`
 sort the view's table by the previous or next column, the way top does,
 `r` reverses; the sorted column carries an arrow in its header, hosts
 of a multicast session stay under their session, and empty cells sort
@@ -177,6 +185,7 @@ read, so "last seen" per client stays with `pyfog clients`.
 ```
 $ pyfog tasks
 Tasks: 6  (server time 2026-09-05 09:07:41, check-in timeout 600s)
+Network  eno1  out 118.4 MiB/s  in 1.2 MiB/s  (1.0s sample)
  ID  HOST            IP         TYPE        STATE                    IMAGE      PROGRESS            ELAPSED      LEFT  NODE           CREATED           CHECK-IN  FLAGS
 MC1  3 hosts: Lab-A  -          Multi-Cast  2 In-Progress, 1 Queued  Win11-Lab  30-31%                    -         -  -              2026-09-05 08:57         -  multicast
   1  pc01            10.0.0.11  Deploy      In-Progress              Win11-Lab  45% 10.2GB/22.5GB  00:05:12  00:06:00  DefaultMember  2026-09-05 08:55    2m 16s  wol
@@ -188,6 +197,70 @@ HOST  IP         IMAGE      KIND    STARTED                  AGE  TASK
 pc01  10.0.0.11  Win11-Lab  deploy  2026-09-05 09:00:55   6m 46s  yes
 pc04  10.0.0.14  Win11-Lab  deploy  2026-09-05 08:25:55  41m 46s  9 closed by server before the host reported; last report 2026-09-05 08:30
 ```
+
+### Throughput
+
+While a host is imaging, `pyfog tasks`, `pyfog multicast` and the
+dashboard show what the server's interfaces are moving, in the direction
+that tells them apart: a deploy is the server sending, a capture is the
+server receiving.
+
+```
+Network  eno1  out 118.4 MiB/s  in 1.2 MiB/s  (1.0s sample)
+```
+
+The numbers are the kernel's own counters from `/proc/net/dev`, read
+twice -- the same measurement `vnstat -l` makes, from the same place, so
+neither vnstat nor any other daemon is needed for it. A single command
+has nothing to compare its reading against and waits a second for the
+second one; the dashboard compares two of its redraws instead, which
+costs nothing and averages over a longer, steadier window (the sample
+length is in the line). Under a multicast session the interface shown is
+the one FOG told `udp-sender` to send on, and only while that sender is
+running.
+
+Nothing is measured on a server where nothing is being deployed or
+captured -- no imaging task, no line, and no second spent taking a
+reading.
+
+### Is the machine on?
+
+Everything `pyfog clients` shows by default is the FOG client talking, so
+a machine that is up with a stopped, broken or never-installed client is
+indistinguishable from one that is off. `--arping` asks the machines
+themselves; the answer is a column in the same table.
+
+```
+$ pyfog clients --arping --stale 30
+HOST  ARP         IP         MAC                IMAGE      LAST SEEN            AGE  SOURCE
+pc01  up          10.0.0.11  00:11:22:33:44:01  Win11-Lab  2026-09-05 09:05  2m 16s  log
+pc02  up          10.0.0.12  00:11:22:33:44:02  Win11-Lab  2026-09-05 08:25  42m 46s log
+pc03  silent      10.0.0.13  00:11:22:33:44:03  Win11-Lab  2026-09-04 22:10  11h 02m token
+pc04  other host  10.0.0.14  00:11:22:33:44:04  Win11-Lab  2026-09-01 08:31   4d 00h token
+```
+
+`up` is the host's own MAC answering. `other host` means that address
+answered but a different machine holds it now, so the host has moved or
+the record is stale -- FOG's `hostIP` is not maintained after
+registration. `silent` is no answer: off, on another segment, or asleep.
+`?` is a probe that could not be made at all, with the reason in the
+heading (no `arping` installed, or no permission for a raw socket -- it
+needs root or `CAP_NET_RAW`).
+
+In the dashboard the same view is the `c` key, and `a` turns the probe
+on and off while the screen is up -- that is where this is meant to be
+used. `pyfog dashboard --arping` starts with it already on, and both
+carry `--arping-timeout`.
+
+This is the one command that sends something: one ARP request per host
+listed, 32 in flight, one second each unless `--arping-timeout` says
+otherwise, so a lab answers in about a second. In the dashboard that
+second is part of every refresh while the probe is on, which is why it
+is a key rather than the default. It never crosses a router (ARP is
+local to the segment), and with `--only-stale` only the hosts still on
+the list are asked. Outside the dashboard, `pyfog clients --watch
+SECONDS` repeats the view on its own; it re-reads the access log every
+round, so `--log-bytes` is worth lowering for a fast interval.
 
 ## Installation
 
@@ -238,7 +311,12 @@ on the command line.
 
 `pyfog multicast` and `pyfog clients` read `/proc` and the web server
 access log; both need to run on the FOG server itself (or the storage node
-running the sender) to see those.
+running the sender) to see those. `pyfog tasks`, `pyfog multicast` and the
+dashboard also show the throughput of the server's interfaces while hosts
+are imaging, from the same place: see [Throughput](#throughput).
+`pyfog clients --arping` is the one thing here that puts packets on the
+network rather than only reading: see [Is the machine
+on?](#is-the-machine-on).
 
 ## Where the answers come from
 
@@ -265,7 +343,18 @@ installation.
   patch](#the-multicast-manager-ends-a-session-too-early)).
 * **Multicast**: FOG queues one task per participating host and links
   them to the session through `multicastSessionsAssoc`. pyfog folds
-  them back into one entry. The pid FOG stores in `msSenderPID` is the
+  them back into one entry. Those rows are the hosts in the session, not
+  the ones receiving: a task is linked when the session is built (or when
+  a host picks a named session from the PXE menu), long before
+  `udp-sender` has anyone on the wire, so pyfog reports them as "in
+  session" and leaves the receivers to the udpcast log below the summary.
+  The count the sender waits for is FOG's own
+  `max(linked tasks, msSessClients)` (`lib/service/multicasttask.class.php`),
+  which is the `--min-receivers` on the process line. `msClients` is not
+  read at all: it is a marker rather than a count -- `-2` while a named
+  session takes unregistered clients, `0` once one is finished
+  (`lib/service/multicastmanager.class.php`), and `0` throughout for the
+  ordinary group deploy. The pid FOG stores in `msSenderPID` is the
   `/bin/sh` it starts the sender through (`lib/service/multicasttask.class.php`),
   so pyfog checks that pid and then looks for `udp-sender` children,
   matching by `--portbase`. Only sessions whose sender node is this
@@ -276,6 +365,15 @@ installation.
 * **Group tasks** share their name (`<type> - <group name>`) and creation
   timestamp (`lib/fog/group.class.php`), which is how `pyfog task` finds
   the batch a non-multicast task belongs to.
+* **Throughput**: the kernel's byte counters in `/proc/net/dev`, two
+  readings and the time between them, which is what `vnstat -l` shows and
+  where vnstat reads it from as well, so nothing has to be installed or
+  kept running for the number. It appears only while a host is imaging
+  (a task in-progress or checked in: a multicast task never advances past
+  checked in, the session carries the progress). Under a multicast
+  session it is the interface FOG told `udp-sender` to send on
+  (`msInterface`), elsewhere the busiest interfaces the machine has, with
+  loopback left out. See [Throughput](#throughput).
 * **Client contact**: FOG keeps no "last seen" column. Two proxies are
   used. `hosts.hostSecTime` is the client's token expiry, set to
   now + 30 min whenever the client re-authorizes
@@ -286,6 +384,16 @@ installation.
   UTC to the database session's clock before they are compared. The
   newer of the two is shown, with its source, and logs that exist but
   cannot be read are named in the heading.
+* **Powered on** (`pyfog clients --arping`): both proxies above are the
+  FOG client talking, so a machine that is up with a stopped, broken or
+  never-installed client looks exactly like one that is off. ARP is
+  answered by the network stack, which does not care what runs on the
+  host. The address asked is the one the kernel's ARP cache
+  (`/proc/net/arp`) last saw that MAC at, and `hosts.hostIP` only when
+  the cache has nothing on it; the answering MAC is compared with the
+  host's, so a reply from whoever holds that address today is reported as
+  "other host" and not as this one being up. See [Is the machine
+  on?](#is-the-machine-on).
 * **Time zone** (`pyfog info`): FOG writes every datetime through its PHP
   layer in the zone named by `FOG_TZ_INFO` (default UTC), whatever the
   database server's own time zone is. pyfog's reference "now" is therefore
@@ -456,7 +564,7 @@ enables the `FOG*` units again.
 bin/pyfog            launcher for running from a checkout
 pyfog/config.py     credential discovery
 pyfog/db.py         SELECT-only queries through PyMySQL
-pyfog/local.py      /proc, access log, udpcast log
+pyfog/local.py      /proc, interfaces and ARP, access log, udpcast log
 pyfog/fog.py        data layer: plain dicts, no printing
 pyfog/render.py     tables for the terminal
 pyfog/cli.py        argument parsing and wiring
@@ -476,8 +584,9 @@ what `--json` prints.
 pyfog is only useful if it tells the truth, so check it in three stages.
 
 **1. Unit tests, no database.** `python3 -m unittest` covers credential
-parsing, the access log and udp-sender parsing, the multicast folding
-and the argument handling.
+parsing, the access log and udp-sender parsing, the multicast folding,
+the interface and ARP readings (both arpings' output, a wrapped byte
+counter, a probe with no address to ask at) and the argument handling.
 
 **2. A throwaway MariaDB with FOG's real layout.** `tests/fog-schema.sql`
 is FOG 1.5.10's complete table layout, produced by running every

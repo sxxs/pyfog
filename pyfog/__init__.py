@@ -4,7 +4,7 @@ Layers:
 
     config.py   where the database credentials come from
     db.py       SELECT-only queries through PyMySQL
-    local.py    facts read from this machine: /proc, web server logs, udpcast logs
+    local.py    facts read from this machine: /proc, interfaces, ARP, logs
     fog.py      the data layer: plain dicts describing tasks, hosts, images ...
     render.py   terminal presentation of those dicts
     cli.py      argument parsing, wiring, JSON output
@@ -12,4 +12,4 @@ Layers:
 A later web front end should import fog.Fog and nothing else.
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"

@@ -41,6 +41,21 @@ def size_text(size):
         size /= 1024.0
 
 
+def rate_text(rate):
+    """One interface's throughput, in the direction that matters: a deploy
+    is the server sending, a capture is the server receiving."""
+    return "%s  out %s/s  in %s/s" % (rate["interface"], size_text(rate["tx"]), size_text(rate["rx"]))
+
+
+def network_text(rates, floor=100 * 1024):
+    """The busy interfaces, or the busiest one when the machine is quiet,
+    so the line never disappears while a task is running."""
+    if not rates:
+        return None
+    busy = [r for r in rates if r["rx"] + r["tx"] >= floor][:2] or rates[:1]
+    return "  ".join(rate_text(r) for r in busy) + "  (%.1fs sample)" % busy[0]["seconds"]
+
+
 class Palette(object):
     """ANSI colours, or plain text when disabled."""
 
@@ -198,6 +213,9 @@ def tasks(data, palette, out=sys.stdout, expand=False, sort=None):
     heading = "Tasks: %d  (server time %s, check-in timeout %ds)" % (
         data["count"], data["now"], data["timeout"])
     out.write(palette.bold(heading) + "\n")
+    network = network_text(data.get("network"))
+    if network:
+        out.write("Network  " + network + "\n")
     task_table(data["entries"], palette, expand).write(out, palette, sort=sort)
     imaging_section(data["imaging_open"], palette, out)
 
@@ -323,6 +341,15 @@ def _pairs(lines, palette, out, indent="  "):
         out.write("%s%-*s  %s\n" % (indent, width, label, "-" if value in (None, "") else value))
 
 
+def _clients(s):
+    """The two counts the database has. Neither is "receiving right now":
+    only the udpcast log line below knows who actually connected."""
+    text = "%d in session" % s["clients_in_session"]
+    if s["clients_expected"] > s["clients_in_session"]:
+        text += " of %d the sender waits for" % s["clients_expected"]
+    return text
+
+
 def session_summary(s, palette, out):
     """The session as the database describes it; process facts when present."""
     out.write(palette.bold("Multicast session %d: %s" % (s["id"], s["name"])) + "\n")
@@ -340,12 +367,13 @@ def session_summary(s, palette, out):
         ("State", palette.state(s["state"], s["active"])),
         ("Image", s["image"]),
         ("Port", s["port"]),
-        ("Clients", "%d joined of %d expected" % (s["clients_joined"], s["clients_expected"])),
+        ("Clients", _clients(s)),
         ("Percent", "%d%%" % s["percent"]),
         ("Started", "%s%s" % (s["started"], "  completed " + s["completed"] if s["completed"] else "")),
         ("Storage group", s["storage_group"]),
         ("Sender", sender),
-    ], palette, out)
+    ] + ([("Throughput", rate_text(s["rate"]) + "  (%.1fs sample)" % s["rate"]["seconds"])]
+         if s.get("rate") else []), palette, out)
     for proc in s.get("senders", []):
         out.write("  udp-sender pid %d: portbase %s, min-receivers %s, file %s, since %s\n" % (
             proc["pid"], proc.get("portbase"), proc.get("min_receivers"),
@@ -360,6 +388,9 @@ def session_summary(s, palette, out):
 def multicast(data, palette, out=sys.stdout, sort=None):
     if not data["sessions"]:
         out.write(palette.dim("no multicast sessions") + "\n")
+    network = network_text(data.get("network"))
+    if network:
+        out.write("Network  " + network + "\n\n")
     for s in data["sessions"]:
         session_summary(s, palette, out)
         table = Table(">TASK", "HOST", "IP", "STATE", "PROGRESS", ">ELAPSED", ">LEFT", ">CHECK-IN")
@@ -372,21 +403,45 @@ def multicast(data, palette, out=sys.stdout, sort=None):
     orphan_section(data["orphan_senders"], palette, out)
 
 
+def arp_text(live, palette):
+    """What one ARP probe means. "silent" and not "off": a host on another
+    segment, or one behind a firewall that drops nothing but is simply not
+    on this wire, is quiet for reasons that have nothing to do with power."""
+    if not live or live["how"] is None:
+        return palette.dim("-")           # no address to ask at
+    if live["error"]:
+        return palette.dim("?")           # could not ask; see the heading
+    if live["up"]:
+        return palette.green("up")
+    if live["mac_seen"]:
+        return palette.red("other host")  # that address answers, this host does not own it
+    return palette.dim("silent")
+
+
 def clients(data, palette, out=sys.stdout, stale_after=None, sort=None):
     logs = ", ".join(data["logs"]) or "none readable, token times only"
     if data["logs_unreadable"]:
         logs += "; not readable: " + ", ".join(data["logs_unreadable"])
     out.write(palette.bold("Last contact per host (server time %s; logs: %s)"
                            % (data["now"], logs)) + "\n")
-    table = Table("HOST", "IP", "MAC", "IMAGE", "LAST SEEN", ">AGE", "SOURCE", "LAST CALL FROM")
+    if data.get("probe_error"):
+        out.write(palette.red("arp: " + data["probe_error"]) + "\n")
+    probed = data.get("probed")
+    columns = ["HOST", "IP", "MAC", "IMAGE", "LAST SEEN", ">AGE", "SOURCE", "LAST CALL FROM"]
+    if probed:
+        columns.insert(1, "ARP")
+    table = Table(*columns)
     for h in data["hosts"]:
         age = age_text(h["age"])
         if h["age"] is None:
             age = palette.dim("never")
         elif stale_after and h["age"] > stale_after:
             age = palette.red(age)
-        table.add(h["host"] + (" (pending)" if h["pending"] else ""), h["ip"], h["mac"],
-                  h["image"], h["last_seen"], age, h["source"], h["last_call_from"])
+        row = [h["host"] + (" (pending)" if h["pending"] else ""), h["ip"], h["mac"],
+               h["image"], h["last_seen"], age, h["source"], h["last_call_from"]]
+        if probed:
+            row.insert(1, arp_text(h.get("live"), palette))
+        table.add(*row)
     table.write(out, palette, sort=sort)
 
 
@@ -561,7 +616,11 @@ def dashboard(data, palette, out=sys.stdout, sort=None):
         parts.append(palette.red("%d imaging run%s without a task" % (lost, "" if lost == 1 else "s")))
     if data["orphan_senders"]:
         parts.append(palette.red("%d udp-sender without a session" % len(data["orphan_senders"])))
-    out.write("  ".join(parts) + "\n\n")
+    out.write("  ".join(parts) + "\n")
+    network = network_text(data.get("network"))
+    if network:
+        out.write("Network  " + network + "\n")
+    out.write("\n")
 
     task_table(data["entries"], palette, expand=True).write(out, palette, sort=sort)
     imaging_section(data["imaging_open"], palette, out)

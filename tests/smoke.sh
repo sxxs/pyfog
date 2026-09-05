@@ -6,6 +6,7 @@ cd "$(dirname "$0")/.."
 run() { echo "### pyfog $*"; python3 -m pyfog --no-color "$@"; echo; }
 for c in info "tasks" "tasks --expand --state all" "task 5" "task 1" "history" "scheduled" \
          "multicast --all" "clients --log tests/access.log --stale 60" \
+         "clients --log tests/access.log --arping --arping-timeout 1" \
          "deployments --days 7" "deployments --current" images "hosts pc0" groups \
          "snapins" "snapins --failed" "dashboard --once"; do
     run $c
