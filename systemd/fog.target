@@ -1,0 +1,26 @@
+# One switch for everything FOG runs on this server: the seven PHP
+# services, the web server and its PHP-FPM.
+#
+#   systemctl start|stop|restart|status fog.target
+#   systemctl status fog.slice          # the process tree of all of them
+#
+# The services are pulled in with Wants= below; stop and restart reach
+# them through PartOf=fog.target in their drop-ins, which systemd/install.sh
+# writes to /etc/systemd/system/<unit>.d/fog.conf. FOG's own installer
+# copies its units to /lib/systemd/system and never touches those.
+
+[Unit]
+Description=FOG imaging server (all services and the web server)
+Documentation=https://github.com/sxxs/pyfog
+After=network-online.target mysql.service mariadb.service
+Wants=FOGImageReplicator.service
+Wants=FOGImageSize.service
+Wants=FOGMulticastManager.service
+Wants=FOGPingHosts.service
+Wants=FOGScheduler.service
+Wants=FOGSnapinHash.service
+Wants=FOGSnapinReplicator.service
+# install.sh appends the web server and PHP-FPM units it finds.
+
+[Install]
+WantedBy=multi-user.target

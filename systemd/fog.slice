@@ -1,0 +1,5 @@
+# cgroup for everything in fog.target; systemctl status fog.slice shows
+# the whole process tree. The drop-ins put the services here.
+[Unit]
+Description=FOG imaging server (process tree)
+Documentation=https://github.com/sxxs/pyfog

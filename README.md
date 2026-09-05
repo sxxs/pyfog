@@ -289,6 +289,34 @@ service log (`/opt/fog/log/multicast.log`) then shows "sender finished,
 waiting up to N seconds for the hosts to report" at the end of a
 session.
 
+## One unit for all FOG services
+
+FOG runs as seven systemd services (`FOGImageReplicator`, `FOGImageSize`,
+`FOGMulticastManager`, `FOGPingHosts`, `FOGScheduler`, `FOGSnapinHash`,
+`FOGSnapinReplicator`) next to the web server, each stopped and started
+on its own. `systemd/install.sh` adds one switch for all of them:
+
+```
+sudo pyfog/systemd/install.sh
+systemctl restart fog.target        # or start, stop, status
+systemctl status fog.slice          # the process tree of every unit in it
+```
+
+It installs `fog.target`, which wants the seven services plus the web
+server (`apache2` or `httpd`) and its PHP-FPM unit, and a drop-in
+`/etc/systemd/system/<unit>.d/fog.conf` for each of them with
+`PartOf=fog.target` (so stop and restart of the target reach them) and
+`Slice=fog.slice` (so one status shows all their processes). At boot only
+`fog.target` is enabled; the individual `FOG*` units are disabled, since
+the target pulls them in. FOG's own installer copies its unit files to
+`/lib/systemd/system` and enables them again on an upgrade; the drop-ins
+in `/etc` are untouched by that and the double enable is harmless.
+
+The installer restarts nothing. A running service joins the slice when it
+next starts, `systemctl restart fog.target` does that for all of them at
+once. `--uninstall` removes the target, the slice and the drop-ins and
+enables the `FOG*` units again.
+
 ## Layout
 
 ```
@@ -303,6 +331,7 @@ tests/               python3 -m unittest
 install.sh           installer for the FOG server
 sql/lost-tasks.sql   cleanup of tasks FOG lost track of, run as database root
 patches/             fix for FOG's multicast manager, applied on the FOG server
+systemd/             fog.target: start and stop all FOG services and apache2 at once
 Makefile             make test, make smoke, make dist
 ```
 
