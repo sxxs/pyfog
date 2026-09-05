@@ -41,7 +41,11 @@ INSERT INTO tasks (taskID,taskName,taskCreateTime,taskCheckIn,taskHostID,taskIma
  (8,'Capture - pc06',NOW()-INTERVAL 3 DAY,NOW()-INTERVAL 3 DAY,6,2,5,'admin','0','0000-00-00 00:00:00',2,0,'','','','','',1,1,'0'),
  -- pc04: the multicast manager completed the task when udp-sender exited; the host
  -- never got to report, so imagingLog stays open and taskLog has no Complete row.
- (9,'Multi-Cast - Lab-A',NOW()-INTERVAL 45 MINUTE,NOW()-INTERVAL 35 MINUTE,4,1,4,'admin','0','0000-00-00 00:00:00',8,97,'0.9','00:05:00','00:00:10','21.8GB','22.5GB',1,1,'0');
+ (9,'Multi-Cast - Lab-A',NOW()-INTERVAL 45 MINUTE,NOW()-INTERVAL 35 MINUTE,4,1,4,'admin','0','0000-00-00 00:00:00',8,97,'0.9','00:05:00','00:00:10','21.8GB','22.5GB',1,1,'0'),
+ -- pc06: someone cancelled the session while this host was already writing
+ -- the image. A cancelled host never reports a finish, so its imagingLog
+ -- row stays open although nothing is running any more.
+ (10,'Multi-Cast - Lab-B',NOW()-INTERVAL 25 MINUTE,NOW()-INTERVAL 21 MINUTE,6,1,5,'admin','0','0000-00-00 00:00:00',8,12,'0.9','00:01:30','00:08:00','2.7GB','22.5GB',1,1,'0');
 -- msSenderPID 0: no sender process to look for. Set it to the pid of a
 -- running /bin/sh with udp-sender children to exercise the process check.
 -- msClients is a marker, not a count: 0 for the ordinary group deploy of
@@ -58,10 +62,12 @@ INSERT INTO imagingLog (ilHostID,ilStartTime,ilFinishTime,ilImageName,ilType,ilC
  (5,NOW()-INTERVAL 1 DAY-INTERVAL 20 MINUTE,NOW()-INTERVAL 1 DAY,'Win11-Lab','down','admin'),
  (1,NOW()-INTERVAL 5 MINUTE,'0000-00-00 00:00:00','Win11-Lab','down','admin'),
  (4,NOW()-INTERVAL 40 MINUTE,'0000-00-00 00:00:00','Win11-Lab','down','admin'),
+ (6,NOW()-INTERVAL 20 MINUTE,'0000-00-00 00:00:00','Win11-Lab','down','admin'),
  (6,NOW()-INTERVAL 3 DAY,NOW()-INTERVAL 3 DAY+INTERVAL 15 MINUTE,'Ubuntu-Lab','up','admin');
 INSERT INTO taskLog (taskID,taskStateID,ip,createTime,createdBy) VALUES
  ('7',3,'10.0.0.15',NOW()-INTERVAL 1 DAY-INTERVAL 20 MINUTE,'admin'),('7',4,'10.0.0.15',NOW()-INTERVAL 1 DAY,'admin'),
- ('9',3,'10.0.0.14',NOW()-INTERVAL 40 MINUTE,'admin');
+ ('9',3,'10.0.0.14',NOW()-INTERVAL 40 MINUTE,'admin'),
+ ('10',3,'10.0.0.16',NOW()-INTERVAL 21 MINUTE,'admin'),('10',5,'10.0.0.16',NOW()-INTERVAL 19 MINUTE,'admin');
 
 INSERT INTO snapins (sID,sName,sDesc,sFilePath,sCreator) VALUES
  (1,'Office','','/opt/fog/snapins/office.exe','admin'),(2,'Chrome','','/opt/fog/snapins/chrome.msi','admin');

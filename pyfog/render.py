@@ -248,6 +248,12 @@ def imaging_section(runs, palette, out):
         table.add(run["host"], run["ip"], run["image"], run["kind"], run["started"],
                   age_text(run["age"]), _imaging_task(run, palette))
     table.write(out, palette)
+    if any(run.get("cancelled") for run in runs):
+        # Said once, under the table: without it a row that only says
+        # "Cancelled" reads as something still going wrong.
+        out.write(palette.dim(
+            "  A cancelled task leaves its run open: the host stops without reporting a"
+            " finish. Nothing is still running; sql/lost-tasks.sql clears the rows.") + "\n")
 
 
 def _imaging_task(run, palette):
@@ -257,6 +263,8 @@ def _imaging_task(run, palette):
     task = run.get("task")
     if task is None:
         return palette.red("none (FOG lost track)")
+    if task["cancelled"]:
+        return palette.dim("%d cancelled, run left open" % task["id"])
     if task["closed_by_server"]:
         last = short_dt(task["last_checkin"]) if task["last_checkin"] else "never"
         return palette.red("%d closed by server before the host reported; last report %s"
@@ -611,9 +619,13 @@ def dashboard(data, palette, out=sys.stdout, sort=None):
     if data["sessions"]:
         parts.append("%d multicast session%s" % (len(data["sessions"]),
                                                   "" if len(data["sessions"]) == 1 else "s"))
-    lost = sum(1 for run in data["imaging_open"] if not run["has_task"])
+    lost = sum(1 for run in data["imaging_open"] if run.get("lost", not run["has_task"]))
     if lost:
         parts.append(palette.red("%d imaging run%s without a task" % (lost, "" if lost == 1 else "s")))
+    stopped = sum(1 for run in data["imaging_open"] if run.get("cancelled"))
+    if stopped:
+        parts.append(palette.dim("%d run%s left open by a cancelled task"
+                                 % (stopped, "" if stopped == 1 else "s")))
     if data["orphan_senders"]:
         parts.append(palette.red("%d udp-sender without a session" % len(data["orphan_senders"])))
     out.write("  ".join(parts) + "\n")

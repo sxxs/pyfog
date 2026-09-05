@@ -332,9 +332,19 @@ class Fog(object):
     def imaging_open(self):
         """Hosts that reported the start of an imaging run but not its end.
 
-        imagingLog is written by the host itself (lib/reg-task/taskingelement.php),
-        so a row here with no active task is a host still imaging after FOG
-        lost track of it.
+        imagingLog is written by the host itself (lib/reg-task/taskingelement.php):
+        one row when the run starts, the finish time when it ends. A row
+        with no finish time and no active task is therefore not one fact
+        but three different ones, and they are told apart here because
+        only one of them is a problem:
+
+          cancelled  the task was cancelled while the host was imaging.
+                     A cancelled host never reports a finish, so the row
+                     stays open by design -- expected debris, not a loss.
+          lost       no task at all, or one the server completed before
+                     the host could report: FOG lost track of a run that
+                     may well still be writing to the disk.
+          running    the host still has an active task; nothing to see.
         """
         rows = self.db.query("""
             SELECT il.ilID, il.ilHostID, h.hostName, h.hostIP, il.ilImageName, il.ilType,
@@ -366,6 +376,11 @@ class Fog(object):
             "age": seconds_since(r["ilStartTime"], self.now()),
             "created_by": text(r["ilCreatedBy"]),
             "has_task": r["activeTasks"] > 0,
+            # Cancelling a task is someone deciding this run ends here, so
+            # the open row is the expected trace of that decision. Only
+            # what nobody decided is reported as lost.
+            "cancelled": r["activeTasks"] == 0 and r["lastState"] == CANCELLED,
+            "lost": r["activeTasks"] == 0 and r["lastState"] != CANCELLED,
             # The task that was current when the run started. A Complete
             # task without the taskLog row the host writes on completion
             # was closed by the server (FOG's multicast manager does that
@@ -380,6 +395,7 @@ class Fog(object):
                 "last_checkin": dt_text(r["lastCheckIn"]),
                 "reported": r["reported"] > 0,
                 "closed_by_server": r["lastState"] == COMPLETE and r["reported"] == 0,
+                "cancelled": r["lastState"] == CANCELLED,
             },
         } for r in rows]
 

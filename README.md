@@ -334,13 +334,18 @@ installation.
   well still be imaging.
 * **Imaging runs** come from `imagingLog`, which the host itself opens at
   the start of imaging and closes at the end
-  (`lib/reg-task/taskingelement.class.php`). An open row without an
-  active task is a host still imaging after FOG lost track of it, or a
-  host whose completion report FOG refused. pyfog looks up the task that
-  was current when the run started: Complete, but without the `taskLog`
-  row the host writes on completion, means the server closed it first
+  (`lib/reg-task/taskingelement.class.php`). An open row with no active
+  task is not one fact but three, and pyfog tells them apart by the task
+  that was current when the run started, because only one of them is a
+  problem. **Cancelled**: someone stopped the task while the host was
+  imaging; a cancelled host never reports a finish, so the row stays open
+  by design -- nothing is running, and it is shown in grey and counted
+  apart. **Complete but without the `taskLog` row** the host writes on
+  completion: the server closed the task before the host could report
   (see [the multicast
-  patch](#the-multicast-manager-ends-a-session-too-early)).
+  patch](#the-multicast-manager-ends-a-session-too-early)). **No task at
+  all**: FOG lost track of a run that may well still be writing to the
+  disk. The last two are what "imaging run without a task" counts.
 * **Multicast**: FOG queues one task per participating host and links
   them to the session through `multicastSessionsAssoc`. pyfog folds
   them back into one entry. Those rows are the hosts in the session, not
@@ -446,6 +451,15 @@ lost (12 by default). Lost tasks become Cancelled with a `taskLog` row
 naming the script, sessions Cancelled with a completion time, so FOG's
 multicast service stops their `udp-sender`. Imaging runs without a
 finish time are deleted, because nothing proves the host finished.
+
+An imaging run whose task was **cancelled** is taken whatever `@hours`
+says, and is always deleted rather than closed. Cancelling is someone
+deciding that this run ends here, so there is nothing left to wait for,
+and closing it would record a deployment that was called off and set the
+host's deploy time to an image it never received. This is the case that
+otherwise sits in `pyfog dashboard` for half a day after a cancelled
+deploy: the hosts that had got as far as `partclone` keep their open row,
+while `@hours` still waits for them.
 `@open_imaging = 'close'` is for the case the section below describes,
 where the hosts did finish and only their report was refused: the run
 is closed with the host's last progress report as finish time, the

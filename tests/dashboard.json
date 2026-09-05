@@ -237,8 +237,11 @@
         "percent": 30,
         "last_checkin": "2026-09-05 12:02:08",
         "reported": false,
-        "closed_by_server": false
-      }
+        "closed_by_server": false,
+        "cancelled": false
+      },
+      "cancelled": false,
+      "lost": false
     },
     {
       "id": 3,
@@ -260,8 +263,37 @@
         "percent": 97,
         "last_checkin": "2026-09-05 11:27:23",
         "reported": false,
-        "closed_by_server": true
-      }
+        "closed_by_server": true,
+        "cancelled": false
+      },
+      "cancelled": false,
+      "lost": true
+    },
+    {
+      "id": 4,
+      "host": "pc05",
+      "host_id": 5,
+      "ip": "10.0.0.15",
+      "image": "Win11-Lab",
+      "kind": "deploy",
+      "started": "2026-09-05 11:52:23",
+      "age": 602,
+      "created_by": "admin",
+      "has_task": false,
+      "task": {
+        "id": 10,
+        "type": "Multi-Cast",
+        "state": "Cancelled",
+        "state_id": 5,
+        "active": false,
+        "percent": 12,
+        "last_checkin": "2026-09-05 11:54:23",
+        "reported": false,
+        "closed_by_server": false,
+        "cancelled": true
+      },
+      "cancelled": true,
+      "lost": false
     }
   ],
   "sessions": [

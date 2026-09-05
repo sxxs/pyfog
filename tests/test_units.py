@@ -658,6 +658,9 @@ class RenderTests(unittest.TestCase):
         out = _Buffer()
         render.dashboard(data, render.Palette(False), out)
         for expected in ("Active tasks: 6", "1 stale", "1 imaging run without a task",
+                         "1 run left open by a cancelled task",
+                         "10 cancelled, run left open",
+                         "A cancelled task leaves its run open",
                          "Network  eth0  out 120.0 MiB/s  in 2.0 KiB/s  (3.0s sample)",
                          "Throughput     eth0  out 120.0 MiB/s",
                          "udp-sender pid 4712", "udpcast log: transferring, 2 receivers connected",

@@ -28,7 +28,10 @@
 --      lost; they become Cancelled with a completion time, and FOG's
 --      multicast service then stops the udp-sender.
 --   3. imagingLog rows without a finish time for hosts that no longer have
---      a task; see @open_imaging.
+--      a task; see @open_imaging. A row whose task was cancelled is taken
+--      whatever its age: cancelling is someone deciding the run ends here,
+--      so there is nothing left to wait for, and such a row is always
+--      deleted rather than closed -- the host stopped, it did not finish.
 --   4. snapin jobs still pending for hosts without a task, with their
 --      snapin tasks.
 -- Nothing else is touched: hosts, images, groups and history stay.
@@ -73,6 +76,7 @@ SELECT il.ilID, il.ilHostID, h.hostName, il.ilImageName, il.ilType, il.ilStartTi
        lt.taskID AS lastTaskID, ts.tsName AS lastState,
        (lt.taskStateID = 4 AND NOT EXISTS (SELECT 1 FROM taskLog l
             WHERE l.taskID = lt.taskID AND l.taskStateID = 4)) AS closedByServer,
+       (lt.taskStateID = 5) AS cancelled,
        GREATEST(il.ilStartTime, COALESCE(lt.taskCheckIn, il.ilStartTime)) AS finish
 FROM imagingLog il
 LEFT JOIN hosts h ON h.hostID = il.ilHostID
@@ -82,7 +86,7 @@ LEFT JOIN tasks lt ON lt.taskID = (
     ORDER BY t2.taskCreateTime DESC, t2.taskID DESC LIMIT 1)
 LEFT JOIN taskStates ts ON ts.tsID = lt.taskStateID
 WHERE il.ilFinishTime = '0000-00-00 00:00:00'
-  AND il.ilStartTime < @cutoff
+  AND (il.ilStartTime < @cutoff OR lt.taskStateID = 5)
   AND il.ilHostID NOT IN (SELECT taskHostID FROM live_hosts);
 
 CREATE TEMPORARY TABLE lost_snapin_jobs AS
@@ -106,8 +110,9 @@ SELECT 'imaging run', ilID, hostName,
        CONCAT(ilType, ' ', ilImageName,
               IF(lastTaskID IS NULL, ', no task',
                  CONCAT(', task ', lastTaskID, ' ', lastState,
-                        IF(closedByServer, ' (closed by server before the host reported)', '')))),
-       ilStartTime, IF(@open_imaging = 'close', finish, NULL)
+                        IF(closedByServer, ' (closed by server before the host reported)', ''),
+                        IF(cancelled, ' (run left open by the cancel, deleted)', '')))),
+       ilStartTime, IF(@open_imaging = 'close' AND NOT cancelled, finish, NULL)
 FROM lost_imaging
 UNION ALL
 SELECT 'snapin job', sjID, hostName, NULL, sjCreateTime, NULL FROM lost_snapin_jobs
@@ -123,16 +128,21 @@ WHERE taskID IN (SELECT taskID FROM lost_tasks) AND @dry_run = 0;
 UPDATE multicastSessions SET msState = 5, msCompleteDateTime = NOW()
 WHERE msID IN (SELECT msID FROM lost_sessions) AND @dry_run = 0;
 
+-- A cancelled run is deleted whatever @open_imaging says: closing it would
+-- record a deployment that was called off, and set the host's deploy time
+-- to an image it never received.
 DELETE FROM imagingLog
-WHERE ilID IN (SELECT ilID FROM lost_imaging) AND @dry_run = 0 AND @open_imaging = 'delete';
+WHERE ilID IN (SELECT ilID FROM lost_imaging WHERE @open_imaging = 'delete' OR cancelled)
+  AND @dry_run = 0;
 
 UPDATE imagingLog il JOIN lost_imaging li ON li.ilID = il.ilID
 SET il.ilFinishTime = li.finish
-WHERE @dry_run = 0 AND @open_imaging = 'close';
+WHERE @dry_run = 0 AND @open_imaging = 'close' AND NOT li.cancelled;
 
 UPDATE hosts h JOIN lost_imaging li ON li.ilHostID = h.hostID
 SET h.hostLastDeploy = li.finish
-WHERE @dry_run = 0 AND @open_imaging = 'close' AND li.ilType = 'down' AND h.hostLastDeploy < li.finish;
+WHERE @dry_run = 0 AND @open_imaging = 'close' AND NOT li.cancelled
+  AND li.ilType = 'down' AND h.hostLastDeploy < li.finish;
 
 INSERT INTO taskLog (taskID, taskStateID, ip, createTime, createdBy)
 SELECT lastTaskID, 4, '', finish, 'lost-tasks.sql' FROM lost_imaging
