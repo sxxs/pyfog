@@ -499,7 +499,6 @@ def info(data, palette, out=sys.stdout, sort=None):
         ("Settings from", data["config_source"]),
         ("Server time", data["server_time"]),
         ("Check-in timeout", "%d s" % data["checkin_timeout"]),
-        ("Client interval", "%d s" % data["client_checkin_interval"]),
         ("udp-sender", data["udp_sender"]),
         ("Multicast ports", "from %d" % data["multicast_port_base"]),
         ("Hosts", "%d (%d pending approval)" % (c["hosts"], c["hosts_pending"])),
@@ -507,6 +506,22 @@ def info(data, palette, out=sys.stdout, sort=None):
         ("Tasks", "%d active, %d in table" % (c["tasks_active"], c["tasks_total"])),
         ("Multicast sessions", "%d active" % c["multicast_active"]),
     ], palette, out, indent="")
+    c = data["client"]
+    out.write("\n" + palette.bold("FOG client (global; FOG has no per-host or per-group values)") + "\n")
+    sleep = "%d s set; the server sends %d-%d s (it adds a random 1-91 s)" % (
+        c["checkin_time"], c["sleep_sent"][0], c["sleep_sent"][1])
+    if c["sleep_effective"] != c["sleep_sent"]:
+        sleep += palette.red("; the client accepts %d-%d s and uses 60 s instead"
+                             % c["sleep_accepted"])
+    grace = "%d s set" % c["grace_timeout"]
+    if c["grace_effective"] != c["grace_timeout"]:
+        grace += palette.red("; the client accepts %d-%d s and uses %d s instead"
+                             % (c["grace_accepted"] + (c["grace_effective"],)))
+    _pairs([
+        ("Check-in time", sleep),
+        ("Reboot countdown", grace),
+        ("Force reboot", "yes" if c["force_reboot"] else "no"),
+    ], palette, out)
     out.write("\n" + palette.bold("Storage nodes") + "\n")
     table = Table("NAME", "ADDRESS", "GROUP", "ROLE", "INTERFACE", ">MAX CLIENTS", "ENABLED")
     for n in data["storage_nodes"]:

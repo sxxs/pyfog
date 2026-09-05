@@ -229,6 +229,16 @@ and the `$databaseFields` maps in `packages/web/lib/fog/*.class.php`.
   UTC to the database session's clock before they are compared. The
   newer of the two is shown, with its source, and logs that exist but
   cannot be read are named in the heading.
+* **FOG client intervals** (`pyfog info`): the client asks the server for
+  its configuration on every cycle (`lib/fog/fogpage.class.php`,
+  `requestClientInfo`), and the server answers with
+  `FOG_CLIENT_CHECKIN_TIME` plus a random 1 to 91 seconds as the next
+  sleep, and `FOG_GRACE_TIMEOUT` as the reboot countdown. Both are global
+  settings; FOG keeps no per-host or per-group values for them. The
+  client (fog-client 0.13) accepts a sleep of 30 to 7200 s and a countdown
+  of 60 to 600 s and silently uses 60 s outside those ranges, so a
+  countdown below a minute cannot be configured, and the shortest
+  possible check-in is 31 to 121 s.
 * **History**: `taskLog` gets a row when a task goes In-Progress and one
   when it completes; `history` shows those as start and end.
 * **Snapins**: `snapinTasks` holds state, exit code and the details

@@ -675,7 +675,7 @@ class Fog(object):
                                       values["DATABASE_NAME"]),
             "server_time": dt_text(self.now()),
             "checkin_timeout": self.checkin_timeout(),
-            "client_checkin_interval": to_int(self.setting("FOG_CLIENT_CHECKIN_TIME")),
+            "client": self.client_settings(),
             "udp_sender": values.get("UDPSENDERPATH"),
             "multicast_port_base": to_int(self.setting("FOG_UDPCAST_STARTINGPORT")),
             "counts": {
@@ -698,6 +698,34 @@ class Fog(object):
                 "interface": n["ngmInterface"],
                 "max_clients": n["ngmMaxClients"],
             } for n in nodes],
+        }
+
+    def client_settings(self):
+        """What the FOG client (the Windows/Linux service) is told, and what
+        it does with it. Both values are global: FOG keeps no per-host or
+        per-group check-in or grace time.
+
+        lib/fog/fogpage.class.php requestClientInfo() answers the client's
+        configure call with sleep = FOG_CLIENT_CHECKIN_TIME + mt_rand(1, 91)
+        and promptTime = FOG_GRACE_TIMEOUT. fog-client 0.13
+        (Service/FOGSystemService.cs, Zazzles/AbstractService.cs) accepts a
+        sleep of 30..7200 s and a prompt of 60..600 s; anything else is
+        logged as invalid and replaced by 60 s.
+        """
+        checkin = to_int(self.setting("FOG_CLIENT_CHECKIN_TIME"))
+        grace = to_int(self.setting("FOG_GRACE_TIMEOUT"))
+        sleep_accepted, grace_accepted = (30, 7200), (60, 600)
+        return {
+            "checkin_time": checkin,
+            "sleep_sent": (checkin + 1, checkin + 91),
+            "sleep_accepted": sleep_accepted,
+            "sleep_effective": tuple(s if sleep_accepted[0] <= s <= sleep_accepted[1] else 60
+                                     for s in (checkin + 1, checkin + 91)),
+            "grace_timeout": grace,
+            "grace_accepted": grace_accepted,
+            "grace_effective": grace if grace_accepted[0] <= grace <= grace_accepted[1] else 60,
+            "force_reboot": self.setting("FOG_TASK_FORCE_REBOOT") == "1",
+            "per_host_or_group": False,
         }
 
     # -- dashboard ----------------------------------------------------------
