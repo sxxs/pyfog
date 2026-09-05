@@ -1,0 +1,4 @@
+10.0.0.11 - - [05/Sep/2026:06:00:00 +0000] "GET /fog/service/jobs.php?mac=00:11:22:33:44:01 HTTP/1.1" 200 12 "-" "-"
+10.0.0.11 - - [05/Sep/2026:09:04:00 +0000] "GET /fog/management/index.php?sub=requestClientInfo&mac=00%3A11%3A22%3A33%3A44%3A01%7Caa:bb:cc:dd:ee:ff&newService&json HTTP/1.1" 200 512 "-" "FOG Client"
+10.0.0.13 - - [05/Sep/2026:06:04:00 +0000] "GET /fog/service/jobs.php?mac=00:11:22:33:44:03 HTTP/1.1" 200 12 "-" "-"
+10.0.0.99 - - [05/Sep/2026:09:04:00 +0000] "GET /fog/management/index.php?node=host HTTP/1.1" 200 12 "-" "Mozilla"

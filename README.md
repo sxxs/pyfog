@@ -171,10 +171,58 @@ tests/               python3 -m unittest
 A web front end can build on `pyfog.fog.Fog` alone; every method returns
 what `--json` prints.
 
-## Testing
+## Verification
 
-`python3 -m unittest` covers the parsing and folding logic. The SQL was
-exercised against a MariaDB loaded with FOG 1.5.10's complete schema
-migration (all 279 steps of `schema.php`) and seeded with tasks, a
-multicast session with a wrapped fake `udp-sender`, imaging and snapin
-logs.
+pyfog is only useful if it tells the truth, so check it in three stages.
+
+**1. Unit tests, no database.** `python3 -m unittest` covers credential
+parsing, the access log and udp-sender parsing, the multicast folding
+and the argument handling.
+
+**2. A throwaway MariaDB with FOG's real layout.** `tests/fog-schema.sql`
+is FOG 1.5.10's complete table layout, produced by running every
+migration step of FOG's `schema.php` against an empty MariaDB and
+dumping the result, together with the reference rows FOG inserts itself
+(task states, task types, settings). `tests/seed.sql` adds six hosts,
+two images, two groups, tasks in every state, one multicast session,
+imaging and snapin logs, and `tests/access.log` a matching web server
+log. On a development machine with Docker:
+
+```
+docker run --rm -d --name pyfog-db -p 3307:3306 \
+    -e MARIADB_ROOT_PASSWORD=fog -e MARIADB_DATABASE=fog mariadb:10.11
+sleep 10   # until the server accepts connections
+docker exec -i pyfog-db mariadb -u root -pfog fog < tests/fog-schema.sql
+docker exec -i pyfog-db mariadb -u root -pfog fog < tests/seed.sql
+
+export PYFOG_DB_HOST=127.0.0.1:3307 PYFOG_DB_USER=root PYFOG_DB_PASSWORD=fog PYFOG_DB_NAME=fog
+tests/smoke.sh          # every command once, plus JSON round trips
+bin/pyfog tasks         # or any single command
+docker stop pyfog-db
+```
+
+Any other MariaDB or MySQL works the same way; the seed uses
+`NOW()`-relative timestamps, so ages and stale markers come out
+plausible whenever it is loaded. What to expect from the seed: task 1
+running, task 2 checked in but silent (stale), task 3 queued, tasks 4
+to 6 folded into multicast session 1, pc04 imaging without a task, a
+failed snapin on pc01, and pc02 silent for two days in `clients`.
+
+The multicast process check needs real processes. To exercise it, start
+a stand-in sender the way FOG does and store the shell's pid in the
+session:
+
+```
+sh -c 'sleep 3600; sleep 3600' &     # FOG wraps udp-sender in /bin/sh
+mysql ... -e "UPDATE multicastSessions SET msSenderPID=$! WHERE msID=1"
+```
+
+`pyfog multicast` then reports the wrapper as alive; with a real
+`udp-sender --portbase 63100 ...` child it lists the sender too.
+
+**3. Against the FOG server.** Create a `SELECT`-only account (see
+Installation), run `pyfog info` to confirm credentials, FOG version and
+schema version, then compare `pyfog tasks` and `pyfog multicast` with
+the GUI's Active Tasks page during a deploy. `--debug` prints every SQL
+statement to stderr, which is the fastest way to see why a column or
+row looks different on your installation.
