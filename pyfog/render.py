@@ -511,7 +511,7 @@ def info(data, palette, out=sys.stdout, sort=None):
     sleep = "%d s set; the server sends %d-%d s (it adds a random 1-91 s)" % (
         c["checkin_time"], c["sleep_sent"][0], c["sleep_sent"][1])
     if c["sleep_effective"] != c["sleep_sent"]:
-        sleep += palette.red("; the client accepts %d-%d s and uses 60 s instead"
+        sleep += palette.red("; the client accepts %d-%d s and uses 60 s for anything outside"
                              % c["sleep_accepted"])
     grace = "%d s set" % c["grace_timeout"]
     if c["grace_effective"] != c["grace_timeout"]:
