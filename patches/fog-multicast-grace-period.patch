@@ -1,0 +1,85 @@
+diff --git a/packages/web/lib/service/multicastmanager.class.php b/packages/web/lib/service/multicastmanager.class.php
+index 8592938..95ea4fa 100644
+--- a/packages/web/lib/service/multicastmanager.class.php
++++ b/packages/web/lib/service/multicastmanager.class.php
+@@ -618,15 +618,46 @@ class MulticastManager extends FOGService
+                         ) {
+                             $jobcancelled = true;
+                         }
++                        // udp-sender exits as soon as the data is out; the
++                        // receivers still write the tail, resize partitions
++                        // and only then report completion. Completing the
++                        // session right away sets their tasks to complete
++                        // first, so every later report fails with "No
++                        // Active Task found for Host" and imagingLog, the
++                        // host's deploy time and the task log stay
++                        // unwritten. Keep the session open for the check-in
++                        // timeout after the sender is gone; a host that has
++                        // not reported by then is treated as gone, as
++                        // before.
++                        $senderGone = !$runningTask->isRunning(
++                            $runningTask->procRef
++                        );
++                        $grace = max(0, (int)self::getSetting('FOG_CHECKIN_TIMEOUT'));
++                        if ($senderGone && $runningTask->senderGoneAt === null) {
++                            $runningTask->senderGoneAt = time();
++                            self::outall(
++                                sprintf(
++                                    $startStr,
++                                    $runningTask->getID(),
++                                    $runningTask->getName(),
++                                    sprintf(
++                                        _('sender finished, waiting up to %d seconds for the hosts to report'),
++                                        $grace
++                                    )
++                                )
++                            );
++                        }
++                        $graceOver = $senderGone
++                            && (time() - $runningTask->senderGoneAt) >= $grace;
+                         if ($SessCompleted
+                             || (count($inTaskCompletedIDs) > 0 && count($inTaskCompletedIDs) >= count($taskIDs))
+-                            || ($runningTask->isNamedSessionFinished())
++                            || ($runningTask->isNamedSessionFinished() && $graceOver)
+                         ) {
+                             $jobcompleted = true;
+                         }
+ 
+                         if (!$jobcancelled && !$jobcompleted) {
+-                            if ($runningTask->isRunning($runningTask->procRef)) {
++                            if (!$senderGone) {
+                                 self::outall(
+                                     sprintf(
+                                         $startStr,
+@@ -638,6 +669,11 @@ class MulticastManager extends FOGService
+                                 );
+ 
+                                 $runningTask->updateStats();
++                            } elseif (!$graceOver) {
++                                // Sender gone, hosts still reporting: the
++                                // completed-task count above ends the
++                                // session as soon as all of them have.
++                                continue;
+                             } else {
+                                 self::outall(
+                                     sprintf(
+diff --git a/packages/web/lib/service/multicasttask.class.php b/packages/web/lib/service/multicasttask.class.php
+index 798f5cc..fb833cd 100644
+--- a/packages/web/lib/service/multicasttask.class.php
++++ b/packages/web/lib/service/multicasttask.class.php
+@@ -301,6 +301,15 @@ class MulticastTask extends FOGService
+      * @var resource
+      */
+     public $procPipes;
++    /**
++     * Unix time at which the multicast manager first saw the udp-sender
++     * gone while the session was still in progress, null while it runs.
++     * The manager keeps the session open for a grace period from here
++     * so the receivers can still report their completion.
++     *
++     * @var int|null
++     */
++    public $senderGoneAt = null;
+     /**
+      * Initializes the task so multicast man can process
+      *

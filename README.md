@@ -251,6 +251,37 @@ instead, so the deploy still counts in `pyfog deployments`. The comment
 at the top of the file has the exact rules; `pyfog tasks` and
 `pyfog deployments` show the result.
 
+## A patch for FOG's multicast manager
+
+`patches/fog-multicast-grace-period.patch` fixes a race in FOG 1.5.10's
+`FOGMulticastManager` that pyfog makes visible as imaging runs FOG lost
+track of. `udp-sender` exits as soon as the data is out; the receivers
+still write the tail of the image, resize partitions and only then
+report completion. The manager, polling every 10 seconds, sees the
+sender gone and completes the session at once
+(`lib/service/multicastmanager.class.php`), which sets every host's task
+to Complete before the host reports. Each later report then fails with
+"No Active Task found for Host", the host retries and reboots, and the
+imaging log, the host's deploy time and the task log stay unwritten.
+
+With the patch the manager keeps the session open for `FOG_CHECKIN_TIMEOUT`
+seconds after the sender is gone, ends it as soon as all hosts have
+reported (that path existed already), and only after the timeout treats
+the remaining hosts as gone, as before. Applied from the FOG web root:
+
+```
+cd /var/www/html/fog          # wherever lib/service/multicastmanager.class.php is
+patch -p3 --dry-run < /path/to/pyfog/patches/fog-multicast-grace-period.patch
+patch -p3 < /path/to/pyfog/patches/fog-multicast-grace-period.patch
+systemctl restart FOGMulticastManager
+```
+
+The patch is against the `stable` branch at 1.5.10.2253 and applies
+cleanly there; `--dry-run` tells you whether it does on yours. The
+service log (`/opt/fog/log/multicast.log`) then shows "sender finished,
+waiting up to N seconds for the hosts to report" at the end of a
+session.
+
 ## Layout
 
 ```
@@ -264,6 +295,7 @@ pyfog/cli.py        argument parsing and wiring
 tests/               python3 -m unittest
 install.sh           installer for the FOG server
 sql/lost-tasks.sql   cleanup of tasks FOG lost track of, run as database root
+patches/             fix for FOG's multicast manager, applied on the FOG server
 Makefile             make test, make smoke, make dist
 ```
 
