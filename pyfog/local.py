@@ -10,7 +10,7 @@ import os
 import re
 import socket
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .util import normalize_mac, to_int
 
@@ -45,8 +45,12 @@ def processes():
     """pid -> {pid, ppid, argv, started, exe} for every readable process."""
     procs = {}
     btime = _boot_time()
-    ticks = os.sysconf("SC_CLK_TCK")
-    for entry in os.listdir("/proc"):
+    try:
+        entries = os.listdir("/proc")
+        ticks = os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError):
+        return {}  # not Linux, or /proc not mounted: no process facts
+    for entry in entries:
         if not entry.isdigit():
             continue
         pid = int(entry)
@@ -109,8 +113,19 @@ def descendants(procs, root):
     return found
 
 
+_local_names = None
+
+
 def local_names():
-    """Hostnames and addresses that mean "this machine"."""
+    """Hostnames and addresses that mean "this machine". Cached: a watch
+    loop must not resolve the hostname on every refresh."""
+    global _local_names
+    if _local_names is None:
+        _local_names = _find_local_names()
+    return _local_names
+
+
+def _find_local_names():
     names = {"localhost", "127.0.0.1", "::1"}
     hostname = socket.gethostname()
     names.update({hostname.lower(), hostname.split(".")[0].lower()})
@@ -147,15 +162,22 @@ def _tail_lines(path, max_bytes):
 
 
 def client_calls(paths, max_bytes):
-    """mac -> {"last_seen", "ip", "path", "count"} from FOG client requests.
+    """(mac -> {"last_seen", "ip", "path", "count"}, unreadable paths) from
+    FOG client requests. last_seen is naive UTC; the caller shifts it to
+    the clock it compares against.
 
     The FOG client identifies itself with a mac= parameter on every call
     (lib/fog/fogbase.class.php reads it from GET or POST), so any logged
     request carrying that parameter is a client check-in.
     """
-    seen = {}
+    seen, unreadable = {}, []
     for path in paths:
-        for line in _tail_lines(path, max_bytes):
+        try:
+            lines = _tail_lines(path, max_bytes)
+        except OSError:
+            unreadable.append(path)
+            continue
+        for line in lines:
             match = ACCESS_LINE.search(line)
             if not match:
                 continue
@@ -167,7 +189,7 @@ def client_calls(paths, max_bytes):
                 when = datetime.strptime(stamp, "%d/%b/%Y:%H:%M:%S %z")
             except ValueError:
                 continue
-            when = when.astimezone().replace(tzinfo=None)
+            when = when.astimezone(timezone.utc).replace(tzinfo=None)
             for raw in re.split(r"[|,]|%7C|%2C", macs.group(1), flags=re.I):
                 mac = normalize_mac(raw.replace("%3A", ":").replace("%3a", ":"))
                 if len(mac) != 12:
@@ -177,7 +199,7 @@ def client_calls(paths, max_bytes):
                 entry["count"] += 1
                 if entry["last_seen"] is None or when > entry["last_seen"]:
                     entry.update(last_seen=when, ip=ip, path=url.split("?")[0])
-    return seen
+    return seen, unreadable
 
 
 # -- udpcast session log ----------------------------------------------------
@@ -185,11 +207,12 @@ def client_calls(paths, max_bytes):
 
 def udpcast_log(path, max_bytes=256 * 1024):
     """Receivers and phase from a udp-sender log FOG keeps per session."""
-    if not os.path.isfile(path):
-        return None
-    with open(path, "rb") as handle:
-        handle.seek(max(0, os.path.getsize(path) - max_bytes))
-        text = handle.read().decode("utf-8", "replace").replace("\r", "\n")
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(max(0, os.path.getsize(path) - max_bytes))
+            text = handle.read().decode("utf-8", "replace").replace("\r", "\n")
+    except OSError:
+        return None  # no log for this session, or not ours to read
     receivers = []
     for match in re.finditer(r"New connection from (\S+)", text):
         if match.group(1) not in receivers:

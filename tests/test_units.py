@@ -29,6 +29,24 @@ class ConfigTests(unittest.TestCase):
                                    db_host="db.example:3307")
         self.assertEqual(settings.hostport, ("db.example", 3307))
 
+    def test_full_overrides_survive_an_unreadable_config(self):
+        def denied(path):
+            raise IOError(13, "Permission denied", path)
+        with tempfile.NamedTemporaryFile("w", suffix=".php", delete=False) as fh:
+            fh.write("<?php\n")
+        original = config.read_php_config
+        config.read_php_config = denied
+        try:
+            with self.assertRaises(config.ConfigError):
+                config.Settings(config=fh.name, environ={}, db_host="h", db_user="u")
+            settings = config.Settings(config=fh.name, environ={}, db_host="h", db_name="fog",
+                                       db_user="u", db_password="")
+        finally:
+            config.read_php_config = original
+            os.unlink(fh.name)
+        self.assertEqual(settings.values["DATABASE_HOST"], "h")
+        self.assertEqual(settings.source, "command line")
+
     def test_fogsettings_fallback_strips_quotes(self):
         with tempfile.NamedTemporaryFile("w", delete=False) as fh:
             fh.write("## FOG settings\nsnmysqluser='fogmaster'\nsnmysqlpass=\"secret\"\n")
@@ -83,13 +101,15 @@ class LocalTests(unittest.TestCase):
         with tempfile.NamedTemporaryFile("w", delete=False) as fh:
             fh.write("\n".join(lines) + "\n")
         try:
-            calls = local.client_calls([fh.name], 1 << 20)
+            calls, unreadable = local.client_calls([fh.name, "/nonexistent/access.log"], 1 << 20)
         finally:
             os.unlink(fh.name)
+        self.assertEqual(unreadable, ["/nonexistent/access.log"])
         self.assertEqual(set(calls), {"001122334401", "aabbccddeeff"})
         self.assertEqual(calls["001122334401"]["count"], 2)
         self.assertEqual(calls["001122334401"]["path"], "/fog/management/index.php")
-        self.assertIsInstance(calls["001122334401"]["last_seen"], datetime)
+        # Naive UTC, whatever this process's time zone is.
+        self.assertEqual(calls["001122334401"]["last_seen"], datetime(2026, 9, 5, 9, 0, 0))
 
     def test_udpcast_log(self):
         with tempfile.NamedTemporaryFile("w", delete=False) as fh:
@@ -109,6 +129,35 @@ def _task(**kw):
             "multicast_session": 7}
     base.update(kw)
     return base
+
+
+class SenderMatchingTests(unittest.TestCase):
+    def session(self, **kw):
+        base = {"id": 1, "active": True, "port": 63100, "sender_pid": 50,
+                "sender_node": "fog", "sender_address": "fog.example"}
+        base.update(kw)
+        return base
+
+    def test_remote_and_finished_sessions_claim_nothing(self):
+        procs = {50: {"ppid": 1}, 99: {"ppid": 50}}
+        senders = {99: {"pid": 99, "portbase": 63100}}
+        local_session = self.session()
+        remote = self.session(id=2, sender_address="other.example")
+        finished = self.session(id=3, active=False)
+        claimed = fog.match_senders([remote, finished], procs, senders, {"fog.example"})
+        self.assertEqual(claimed, set())
+        self.assertFalse(remote["sender_local"])
+        self.assertEqual((remote["wrapper_alive"], remote["senders"]), (None, []))
+        self.assertEqual((finished["wrapper_alive"], finished["senders"]), (True, []))
+        claimed = fog.match_senders([local_session], procs, senders, {"fog.example"})
+        self.assertEqual(claimed, {99})
+        self.assertEqual([s["pid"] for s in local_session["senders"]], [99])
+
+    def test_session_without_node_counts_as_local(self):
+        session = self.session(sender_node=None, sender_address=None, sender_pid=None)
+        fog.match_senders([session], {}, {}, set())
+        self.assertTrue(session["sender_local"])
+        self.assertIsNone(session["wrapper_alive"])
 
 
 class GroupingTests(unittest.TestCase):
@@ -144,6 +193,19 @@ class CliTests(unittest.TestCase):
         self.assertEqual(sorted(name for _, name in cli.VIEWS),
                          sorted(("tasks", "multicast", "history", "scheduled", "clients",
                                  "deployments", "images", "hosts", "groups", "snapins", "info")))
+
+    def test_keys_decode(self):
+        self.assertEqual(cli.Keys.decode(b"\x1b"), "esc")
+        self.assertEqual(cli.Keys.decode(b"\x1b[H"), "home")
+        self.assertEqual(cli.Keys.decode(b"\x1bOH"), "home")
+        self.assertIsNone(cli.Keys.decode(b"\x1b[A"))
+        self.assertEqual(cli.Keys.decode(b"Q"), "q")
+
+    def test_interval_must_be_positive(self):
+        parser = cli.build_parser()
+        for argv in (["dashboard", "--interval", "0"], ["tasks", "--watch", "-1"]):
+            with self.assertRaises(ValueError):
+                cli.refresh_interval(parser.parse_args(argv))
 
     def test_dashboard_refreshes_only_on_a_terminal(self):
         parser = cli.build_parser()
@@ -191,6 +253,15 @@ class RenderTests(unittest.TestCase):
         lines = render.ANSI.sub("", frame.replace("\033[H", "").replace("\033[J", "")).split("\n")
         self.assertTrue(all(len(line.replace("\033[K", "")) <= 20 for line in lines))
         self.assertEqual(render.frame("a\nb", size=(20, 10)), "\033[Ha\033[K\nb\033[K\033[J")
+        self.assertEqual(render.frame("x" * 20, size=(20, 10)).count("x"), 18)  # never the last column
+        self.assertNotIn("more lines", render.frame("a\nb\nc", size=(0, 0)))
+
+    def test_scheduled_without_a_date(self):
+        out = _Buffer()
+        render.scheduled([{"id": 1, "name": "n", "type": "Deploy", "when": None, "cron": None,
+                           "target_kind": "host", "target": "pc", "image": "i", "active": True}],
+                         render.Palette(False), out)
+        self.assertIn("never", out.text)
 
 
 class _Buffer(object):

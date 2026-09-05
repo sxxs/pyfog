@@ -24,7 +24,11 @@ class Database(object):
             self.conn = pymysql.connect(
                 host=host, port=port or 3306, user=values["DATABASE_USERNAME"],
                 password=values["DATABASE_PASSWORD"], database=values["DATABASE_NAME"],
-                charset="utf8mb4", cursorclass=pymysql.cursors.DictCursor)
+                charset="utf8mb4", cursorclass=pymysql.cursors.DictCursor,
+                # Without autocommit InnoDB's REPEATABLE READ pins every later
+                # SELECT on this connection to the first one's snapshot, so a
+                # watch loop would show the same rows forever.
+                autocommit=True)
         except pymysql.MySQLError as exc:
             raise DatabaseError("cannot connect to the FOG database as %s@%s: %s"
                                 % (values["DATABASE_USERNAME"], host, exc))

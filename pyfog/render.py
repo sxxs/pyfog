@@ -141,9 +141,7 @@ def tasks(data, palette, out=sys.stdout, expand=False):
         data["count"], data["now"], data["timeout"])
     out.write(palette.bold(heading) + "\n")
     task_table(data["entries"], palette, expand).write(out, palette)
-    if data["imaging_open"]:
-        out.write("\n" + palette.bold("Imaging runs the hosts reported as started but not finished:") + "\n")
-        imaging_table(data["imaging_open"], palette).write(out, palette)
+    imaging_section(data["imaging_open"], palette, out)
 
 
 def task_table(entries, palette, expand=False):
@@ -164,13 +162,28 @@ def task_table(entries, palette, expand=False):
     return table
 
 
-def imaging_table(runs, palette):
+def imaging_section(runs, palette, out):
+    """Open imagingLog rows, under their heading; nothing when there are none."""
+    if not runs:
+        return
+    out.write("\n" + palette.bold("Imaging runs reported as started but not finished") + "\n")
     table = Table("HOST", "IP", "IMAGE", "KIND", "STARTED", ">AGE", "TASK")
     for run in runs:
         table.add(run["host"], run["ip"], run["image"], run["kind"], run["started"],
                   age_text(run["age"]),
                   "yes" if run["has_task"] else palette.red("none (FOG lost track)"))
-    return table
+    table.write(out, palette)
+
+
+def orphan_section(procs, palette, out):
+    """udp-sender processes no active local session claims; nothing when none."""
+    if not procs:
+        return
+    out.write("\n" + palette.red("udp-sender processes no active session claims:") + "\n")
+    for proc in procs:
+        out.write("  pid %d: portbase %s, min-receivers %s, file %s, since %s\n" % (
+            proc["pid"], proc.get("portbase"), proc.get("min_receivers"), proc.get("file"),
+            proc["started"]))
 
 
 def _session_states(entry, palette):
@@ -285,17 +298,15 @@ def multicast(data, palette, out=sys.stdout):
                       _progress(p), p["elapsed"], p["remaining"],
                       palette.red(checkin) if p["stale"] else checkin)
         table.write(out, palette, indent="  ")
-        out.write("\n")
-    if data["orphan_senders"]:
-        out.write(palette.red("udp-sender processes no active session claims:") + "\n")
-        for proc in data["orphan_senders"]:
-            out.write("  pid %d: portbase %s, file %s, since %s\n" % (
-                proc["pid"], proc.get("portbase"), proc.get("file"), proc["started"]))
+    orphan_section(data["orphan_senders"], palette, out)
 
 
 def clients(data, palette, out=sys.stdout, stale_after=None):
-    out.write(palette.bold("Last contact per host (server time %s; logs: %s)" % (
-        data["now"], ", ".join(data["logs"]) or "none readable, token times only")) + "\n")
+    logs = ", ".join(data["logs"]) or "none readable, token times only"
+    if data["logs_unreadable"]:
+        logs += "; not readable: " + ", ".join(data["logs_unreadable"])
+    out.write(palette.bold("Last contact per host (server time %s; logs: %s)"
+                           % (data["now"], logs)) + "\n")
     table = Table("HOST", "IP", "MAC", "IMAGE", "LAST SEEN", ">AGE", "SOURCE", "LAST CALL FROM")
     for h in data["hosts"]:
         age = age_text(h["age"])
@@ -390,7 +401,8 @@ def history(data, palette, out=sys.stdout, expand=False):
 def scheduled(data, palette, out=sys.stdout):
     table = Table(">ID", "NAME", "TYPE", "WHEN", "TARGET", "IMAGE", "ACTIVE")
     for s in data:
-        table.add(s["id"], s["name"], s["type"], s["when"] or "cron " + s["cron"],
+        table.add(s["id"], s["name"], s["type"],
+                  s["when"] or ("cron " + s["cron"] if s["cron"] else palette.dim("never")),
                   "%s %s" % (s["target_kind"], s["target"]), s["image"],
                   "yes" if s["active"] else palette.dim("no"))
     table.write(out, palette)
@@ -443,17 +455,11 @@ def dashboard(data, palette, out=sys.stdout):
     out.write("  ".join(parts) + "\n\n")
 
     task_table(data["entries"], palette, expand=True).write(out, palette)
-    if data["imaging_open"]:
-        out.write("\n" + palette.bold("Imaging runs reported as started but not finished") + "\n")
-        imaging_table(data["imaging_open"], palette).write(out, palette)
+    imaging_section(data["imaging_open"], palette, out)
     for s in data["sessions"]:
         out.write("\n")
         session_summary(s, palette, out)
-    if data["orphan_senders"]:
-        out.write("\n" + palette.red("udp-sender processes no active session claims:") + "\n")
-        for proc in data["orphan_senders"]:
-            out.write("  pid %d: portbase %s, file %s, since %s\n" % (
-                proc["pid"], proc.get("portbase"), proc.get("file"), proc["started"]))
+    orphan_section(data["orphan_senders"], palette, out)
     if data["recent"]:
         out.write("\n" + palette.bold("Recently finished tasks") + "\n")
         history(data["recent"], palette, out)
@@ -472,7 +478,11 @@ def frame(text, size=None):
     are dropped and counted in the last row, so the screen never scrolls.
     """
     columns, rows = size or shutil.get_terminal_size((160, 25))
-    lines = [_clip(line, columns) for line in text.rstrip("\n").split("\n")]
+    # A pty without a window size reports 0x0 on older Pythons.
+    columns, rows = (columns if columns > 1 else 160), (rows if rows > 1 else 25)
+    # One column short: a line that fills the row leaves the cursor in the
+    # terminal's pending-wrap state, where erase-to-end eats the last cell.
+    lines = [_clip(line, columns - 1) for line in text.rstrip("\n").split("\n")]
     if len(lines) > rows:
         lines = lines[:rows - 1] + ["… %d more lines" % (len(lines) - rows + 1)]
     return "\033[H" + "\033[K\n".join(lines) + "\033[K\033[J"

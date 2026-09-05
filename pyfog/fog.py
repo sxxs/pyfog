@@ -116,6 +116,13 @@ class Fog(object):
             self._settings = {r["settingKey"]: r["settingValue"] for r in rows}
         return self._settings.get(key, default)
 
+    def utc_offset(self):
+        """Seconds the database session's clock is ahead of UTC. Log times
+        are converted through UTC, so they compare with NOW() correctly
+        even when the database session and this process disagree on the
+        time zone."""
+        return to_int(self.db.scalar("SELECT TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), NOW())"))
+
     def checkin_timeout(self):
         """Seconds without check-in after which FOG re-queues a task
         (lib/fog/task.class.php enforces the 180 s floor)."""
@@ -257,7 +264,8 @@ class Fog(object):
     def scheduled(self):
         """Delayed and cron style tasks FOG will create later."""
         rows = self.db.query("""
-            SELECT st.stID, st.stName, st.stType, st.stActive, st.stDateTime,
+            SELECT st.stID, st.stName, st.stType, st.stActive,
+                   IF(st.stDateTime > 0, FROM_UNIXTIME(st.stDateTime), NULL) AS stWhen,
                    st.stMinute, st.stHour, st.stDOM, st.stMonth, st.stDOW,
                    st.stIsGroup, tt.ttName, i.imageName, h.hostName, g.groupName
             FROM scheduledTasks st
@@ -275,8 +283,7 @@ class Fog(object):
                 "type": row["ttName"],
                 "kind": "once" if once else "cron",
                 "active": row["stActive"] == "1",
-                "when": dt_text(datetime.fromtimestamp(row["stDateTime"]))
-                if once and row["stDateTime"] else None,
+                "when": dt_text(row["stWhen"]) if once else None,
                 "cron": None if once else " ".join(
                     row[c] or "*" for c in ("stMinute", "stHour", "stDOM", "stMonth", "stDOW")),
                 "target": row["groupName"] if is_group else row["hostName"],
@@ -338,44 +345,40 @@ class Fog(object):
             "sender_started": dt_text(row["msSenderStart"]),
         }
 
-    def multicast(self, include_finished=False, limit=20):
+    def multicast(self, include_finished=False, limit=20, participants=True):
         """Sessions with their participants and the udp-sender processes.
 
         FOG records the pid of the /bin/sh it starts the sender through
         (lib/service/multicasttask.class.php), so the udp-sender itself is a
         child of that pid. Both are checked, and senders nobody claims are
-        reported as orphans.
+        reported as orphans. Every active session takes part in that
+        matching, whatever the listing is limited to.
         """
-        sql = SESSION_SQL
-        if not include_finished:
-            sql += " WHERE ms.msState IN " + ACTIVE
-        sql += " ORDER BY ms.msStartDateTime DESC, ms.msID DESC LIMIT %s"
-        sessions = [self._session(r) for r in self.db.query(sql, [limit])]
+        order = " ORDER BY ms.msStartDateTime DESC, ms.msID DESC"
+        active = [self._session(r) for r in
+                  self.db.query(SESSION_SQL + " WHERE ms.msState IN " + ACTIVE + order)]
+        if include_finished:
+            by_id = {s["id"]: s for s in active}
+            rows = self.db.query(SESSION_SQL + order + " LIMIT %s", [limit])
+            shown = [by_id.get(r["msID"]) or self._session(r) for r in rows]
+        else:
+            shown = active[:limit]
 
         procs = local.processes()
         senders = {pid: dict(local.sender_options(p["argv"]), pid=pid,
                              started=dt_text(p["started"]), ppid=p["ppid"])
                    for pid, p in procs.items() if local.is_udp_sender(p)}
-        here = local.local_names()
+        claimed = match_senders(active + [s for s in shown if not s["active"]],
+                                procs, senders, local.local_names())
+
         log_dir = (self.setting("SERVICE_LOG_PATH") or "/opt/fog/log").rstrip("/")
         log_name = self.setting("MULTICASTLOGFILENAME") or "multicast.log"
-
-        claimed = set()
-        for session in sessions:
-            session["participants"] = self._participants(session["id"])
-            session["sender_local"] = (session["sender_address"] or "").lower() in here \
-                or session["sender_node"] is None
-            pid = session["sender_pid"]
-            session["wrapper_alive"] = pid in procs if session["sender_local"] and pid else None
-            mine = [s for s in senders.values()
-                    if s.get("portbase") == session["port"]
-                    or (pid and s["pid"] in local.descendants(procs, pid))]
-            claimed.update(s["pid"] for s in mine)
-            session["senders"] = mine
-            session["log"] = local.udpcast_log("%s/%s.udpcast.%s"
-                                               % (log_dir, log_name, session["id"]))
+        for session in shown:
+            session["participants"] = self._participants(session["id"]) if participants else None
+            session["log"] = local.udpcast_log("%s/%s.udpcast.%s" % (log_dir, log_name, session["id"])) \
+                if session["sender_local"] else None
         return {
-            "sessions": sessions,
+            "sessions": shown,
             "orphan_senders": [s for pid, s in senders.items() if pid not in claimed],
             "udp_sender_path": self.settings.values.get("UDPSENDERPATH"),
         }
@@ -393,8 +396,11 @@ class Fog(object):
                        for r in self.db.query("SELECT hmHostID, hmMAC FROM hostMAC")}
 
         paths = local.find_access_logs() if log_paths is None else log_paths
+        seen, unreadable = local.client_calls(paths, log_bytes)
+        offset = timedelta(seconds=self.utc_offset())
         calls = {}
-        for mac, entry in local.client_calls(paths, log_bytes).items():
+        for mac, entry in seen.items():
+            entry["last_seen"] += offset  # naive UTC -> the database's clock
             host_id = mac_to_host.get(mac)
             if host_id and (host_id not in calls or entry["last_seen"] > calls[host_id]["last_seen"]):
                 calls[host_id] = entry
@@ -424,7 +430,8 @@ class Fog(object):
                 "last_call_path": call["path"] if call else None,
             })
         out.sort(key=lambda e: (e["age"] is None, e["age"] or 0))
-        return {"hosts": out, "logs": paths, "now": dt_text(now)}
+        return {"hosts": out, "logs": [p for p in paths if p not in unreadable],
+                "logs_unreadable": unreadable, "now": dt_text(now)}
 
     # -- deployments and images ---------------------------------------------
 
@@ -681,7 +688,7 @@ class Fog(object):
         for task in tasks:
             states[task["state"]] = states.get(task["state"], 0) + 1
             stale += task["stale"]
-        multicast = self.multicast()
+        multicast = self.multicast(participants=False)
         return {
             "now": dt_text(self.now()),
             "timeout": self.checkin_timeout(),
@@ -695,6 +702,31 @@ class Fog(object):
             "recent": group_multicast(self.history(limit=recent)),
             "scheduled": [s for s in self.scheduled() if s["active"]],
         }
+
+
+def match_senders(sessions, procs, senders, here):
+    """Attach process facts to each session; returns the sender pids some
+    active session claims.
+
+    Only a session whose sender runs on this machine (or has no node yet)
+    can be checked: a session on another storage node gets no process
+    facts, so a local sender on the same port stays unclaimed. Finished
+    sessions do not claim either, or an old row with a reused port would
+    hide a sender that really is orphaned.
+    """
+    claimed = set()
+    for session in sessions:
+        pid = session["sender_pid"]
+        session["sender_local"] = (session["sender_address"] or "").lower() in here \
+            or session["sender_node"] is None
+        session["wrapper_alive"] = pid in procs if session["sender_local"] and pid else None
+        session["senders"] = []
+        if session["sender_local"] and session["active"]:
+            session["senders"] = [s for s in senders.values()
+                                  if s.get("portbase") == session["port"]
+                                  or (pid and s["pid"] in local.descendants(procs, pid))]
+            claimed.update(s["pid"] for s in session["senders"])
+    return claimed
 
 
 def group_multicast(tasks):

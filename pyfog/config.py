@@ -90,16 +90,17 @@ class Settings(object):
         candidates = [config or environ.get("PYFOG_CONFIG")]
         if not candidates[0]:
             candidates = list(CONFIG_CANDIDATES)
+        unreadable = None
         for path in candidates:
             if not os.path.isfile(path):
                 continue
             try:
                 self.values.update(read_php_config(path))
             except IOError as exc:
-                if exc.errno == errno.EACCES:
-                    raise ConfigError(
-                        "%s is not readable; run as root or pass --db-* options" % path)
-                raise
+                if exc.errno != errno.EACCES:
+                    raise
+                unreadable = path
+                continue
             self.source = path
             self.webroot = os.path.dirname(os.path.dirname(os.path.dirname(path)))
             break
@@ -123,13 +124,21 @@ class Settings(object):
             ("DATABASE_USERNAME", db_user, environ.get("PYFOG_DB_USER")),
             ("DATABASE_PASSWORD", db_password, environ.get("PYFOG_DB_PASSWORD")),
         )
+        overridden = set()
         for key, from_args, from_env in overrides:
             if from_args is not None:
                 self.values[key] = from_args
                 self.source = self.source or "command line"
+                overridden.add(key)
             elif from_env:
                 self.values[key] = from_env
                 self.source = self.source or "environment"
+                overridden.add(key)
+        # A user with their own SELECT account may name every credential
+        # and never needs FOG's root-only config file.
+        if unreadable and len(overridden) < len(overrides):
+            raise ConfigError("%s is not readable; run as root or pass all --db-* options"
+                              % unreadable)
 
     @property
     def hostport(self):

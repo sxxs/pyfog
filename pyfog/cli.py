@@ -181,10 +181,13 @@ def collect(api, args):
 
 
 def refresh_interval(args):
-    """Seconds between redraws, or None for a single run."""
-    if args.command == "dashboard":
-        return None if args.once or args.json or not sys.stdout.isatty() else args.interval
-    return getattr(args, "watch", None)
+    """Seconds between rounds, or None for a single run."""
+    interval = args.interval if args.command == "dashboard" else getattr(args, "watch", None)
+    if interval is not None and interval < 1:
+        raise ValueError("the refresh interval must be at least 1 second")
+    if args.command == "dashboard" and (args.once or args.json or not sys.stdout.isatty()):
+        return None
+    return interval
 
 
 def main(argv=None):
@@ -209,15 +212,15 @@ def main(argv=None):
         else:
             show(data, palette, **kwargs)
         return 0
-    except (DatabaseError, LookupError, ValueError) as exc:
-        sys.stderr.write("pyfog: %s\n" % exc)
-        return 1
-    except KeyboardInterrupt:
-        return 130
     except BrokenPipeError:
         # Output piped into head or less that stopped reading.
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         return 0
+    except (DatabaseError, LookupError, ValueError, OSError) as exc:
+        sys.stderr.write("pyfog: %s\n" % exc)
+        return 1
+    except KeyboardInterrupt:
+        return 130
     finally:
         if db is not None:
             db.close()
@@ -238,12 +241,15 @@ class Keys(object):
     """Single key presses from a terminal on stdin, or nothing at all.
 
     Puts the terminal into cbreak mode (keys arrive without Enter, Ctrl-C
-    still works) and restores it on exit. When stdin is not a terminal,
+    still works) and restores it on exit. Without a terminal on stdin,
     for example `ssh host pyfog dashboard` without -t, read() only waits.
     """
 
-    def __init__(self):
-        self.fd = sys.stdin.fileno() if sys.stdin.isatty() else None
+    HOME = (b"\x1b[H", b"\x1b[1~", b"\x1bOH")
+
+    def __init__(self, enabled=True):
+        stdin = sys.stdin if enabled else None
+        self.fd = stdin.fileno() if stdin is not None and stdin.isatty() else None
         self.saved = None
 
     def __enter__(self):
@@ -260,37 +266,57 @@ class Keys(object):
     def enabled(self):
         return self.fd is not None
 
-    def read(self, timeout):
-        """One key within timeout seconds, or None. Escape sequences (arrow
-        keys and the like) are swallowed; a lone Escape comes back as "esc"."""
+    def read(self, timeout, accept):
+        """One of the accepted keys within timeout seconds, else None.
+        Other keys are ignored and the wait goes on; "esc" and "home" name
+        those keys, letters come back lower case."""
+        deadline = time.monotonic() + max(0.0, timeout)
         if self.fd is None:
             time.sleep(max(0.0, timeout))
             return None
-        ready, _, _ = select.select([self.fd], [], [], max(0.0, timeout))
-        if not ready:
-            return None
-        data = os.read(self.fd, 16)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([self.fd], [], [], remaining)[0]:
+                return None
+            data = os.read(self.fd, 16)
+            if data == b"\x1b" and select.select([self.fd], [], [], 0.05)[0]:
+                data += os.read(self.fd, 16)  # the rest of a sequence over a slow link
+            key = self.decode(data)
+            if key in accept:
+                return key
+
+    @classmethod
+    def decode(cls, data):
         if data == b"\x1b":
             return "esc"
+        if data in cls.HOME:
+            return "home"
         return data.decode("ascii", "replace").lower() if len(data) == 1 else None
 
 
 def watch(args, settings, db, palette, interval):
-    """Redraw the command's output every `interval` seconds until q or Ctrl-C.
+    """Repeat the command every `interval` seconds until q or Ctrl-C.
 
-    The first line of the screen is a status line owned by this loop. A
-    failed query does not end the loop: the last good screen stays up
+    On a terminal the screen is redrawn in place: a status line owned by
+    this loop, the key line, then the command's output. Keys switch to
+    another command's output (see VIEWS); x, Escape or Home return to
+    the command this started with. Into a pipe or with --json, every
+    round appends one complete document instead, and errors go to stderr.
+
+    A failed query does not end the loop: the last good screen stays up
     with the error in the status line, and the next round reconnects.
-    Keys switch to another command's output (see VIEWS); x, Escape or
-    Home return to the command this started with.
     """
-    home, current, body = args, args, ""
+    live = sys.stdout.isatty() and not args.json
+    home = current = args
+    body = ""
+    views = dict(VIEWS)
+    accept = set(views) | {"q", "x", "esc", "home"}
+    key_line = "  ".join("%s %s" % (key, name) for key, name in VIEWS) + "  x back  q quit"
     try:
-        with Keys() as keys:
-            key_line = "  ".join("%s %s" % (key, name) for key, name in VIEWS) \
-                + "  x back  q quit"
+        with Keys(enabled=live) as keys:
             while True:
                 started = time.monotonic()
+                error = None
                 try:
                     if db is None:
                         db = Database(settings, debug=args.debug)
@@ -301,27 +327,36 @@ def watch(args, settings, db, palette, interval):
                         out = io.StringIO()
                         show(data, palette, out=out, **kwargs)
                         body = out.getvalue()
-                    status = palette.dim("pyfog %s  refreshed %s in %d ms, every %ds" % (
-                        current.command, time.strftime("%H:%M:%S"),
-                        (time.monotonic() - started) * 1000, interval))
-                except DatabaseError as exc:
-                    status = palette.red("pyfog %s  %s  database error, retrying every %ds: %s" % (
-                        current.command, time.strftime("%H:%M:%S"), interval, exc))
-                    if db is not None:
+                except (DatabaseError, OSError) as exc:
+                    error = exc
+                    if isinstance(exc, DatabaseError) and db is not None:
                         db.close()
-                    db = None
-                if keys.enabled and not args.json:
-                    status += "\n" + palette.dim(key_line)
-                sys.stdout.write(render.frame(status + "\n" + body))
+                        db = None
+                stamp = time.strftime("%H:%M:%S")
+                if not live:
+                    if error is None:
+                        sys.stdout.write(body.rstrip("\n") + "\n")
+                    else:
+                        sys.stderr.write("pyfog: %s: %s, retrying in %ds\n" % (stamp, error, interval))
+                else:
+                    if error is None:
+                        status = palette.dim("pyfog %s  refreshed %s in %d ms, every %ds" % (
+                            current.command, stamp, (time.monotonic() - started) * 1000, interval))
+                    else:
+                        status = palette.red("pyfog %s  %s  %s, retrying every %ds" % (
+                            current.command, stamp, error, interval))
+                    if keys.enabled:
+                        status += "\n" + palette.dim(key_line)
+                    sys.stdout.write(render.frame(status + "\n" + body))
                 sys.stdout.flush()
-                key = keys.read(interval - (time.monotonic() - started))
+                key = keys.read(interval - (time.monotonic() - started), accept)
                 if key == "q":
                     sys.stdout.write("\n")
                     return 0
-                if key in ("x", "esc"):
+                if key in ("x", "esc", "home"):
                     current = home
-                elif key in dict(VIEWS):
-                    current = view_args(args, dict(VIEWS)[key])
+                elif key in views:
+                    current = view_args(args, views[key])
     except KeyboardInterrupt:
         sys.stdout.write("\n")
         return 130

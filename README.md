@@ -70,8 +70,9 @@ FOG's GUI and API remain the place for that.
 | `pyfog dashboard`         | one screen of what is live: tasks, multicast, imaging runs, recent history, scheduled tasks; redrawn every 3 s, single keys switch to the other commands |
 
 Every command takes `--json` for machine readable output; `tasks` and
-`multicast` take `--watch SECONDS`. `pyfog <command> --help` lists the
-filters.
+`multicast` take `--watch SECONDS`, which redraws the screen the way the
+dashboard does, or, into a pipe or with `--json`, appends one complete
+document per round. `pyfog <command> --help` lists the filters.
 
 ### The dashboard
 
@@ -171,8 +172,9 @@ and the `$databaseFields` maps in `packages/web/lib/fog/*.class.php`.
   them back into one entry. The pid FOG stores in `msSenderPID` is the
   `/bin/sh` it starts the sender through (`lib/service/multicasttask.class.php`),
   so pyfog checks that pid and then looks for `udp-sender` children,
-  matching by `--portbase`. Senders that no active session claims are
-  listed as orphans. The udpcast log FOG keeps per session
+  matching by `--portbase`. Only sessions whose sender node is this
+  machine take part in that matching, and only active ones; senders that
+  no active session claims are listed as orphans. The udpcast log FOG keeps per session
   (`SERVICE_LOG_PATH/MULTICASTLOGFILENAME.udpcast.<id>`) supplies the
   receivers that actually connected.
 * **Group tasks** share their name (`<type> - <group name>`) and creation
@@ -184,8 +186,10 @@ and the `$databaseFields` maps in `packages/web/lib/fog/*.class.php`.
   (`lib/fog/fogpage.class.php`), so `hostSecTime - 30 min` is the last
   authorization the database can prove (30 min resolution). The web
   server access log is exact: every FOG client request carries `mac=`,
-  and pyfog maps that to hosts through `hostMAC`. The newer of the two
-  is shown, with its source.
+  and pyfog maps that to hosts through `hostMAC`; log times go through
+  UTC to the database session's clock before they are compared. The
+  newer of the two is shown, with its source, and logs that exist but
+  cannot be read are named in the heading.
 * **History**: `taskLog` gets a row when a task goes In-Progress and one
   when it completes; `history` shows those as start and end.
 * **Snapins**: `snapinTasks` holds state, exit code and the details
