@@ -257,10 +257,13 @@ nobody will pick up. `sql/lost-tasks.sql` does that, as the database
 root, and by default only reports:
 
 ```
-mysql fog < sql/lost-tasks.sql                                 # report
-mysql fog -e "SET @dry_run = 0; SOURCE sql/lost-tasks.sql"     # apply
-mysql fog -e "SET @hours = 3; SET @open_imaging = 'close'; SOURCE sql/lost-tasks.sql"
+mysql fog < sql/lost-tasks.sql                                          # report
+mysql --init-command="SET @dry_run = 0" fog < sql/lost-tasks.sql        # apply
+mysql --init-command="SET @hours = 3, @open_imaging = 'close'" fog < sql/lost-tasks.sql
 ```
+
+(`mariadb` in place of `mysql` works the same; `--init-command` sets the
+variables in the session before the file runs.)
 
 `@hours` says how long something may stay silent before it counts as
 lost (12 by default). Lost tasks become Cancelled with a `taskLog` row
