@@ -8,6 +8,48 @@ find out. It never writes to the database and never calls the FOG API.
 Python 3.6+, standard library only. Needs the `mysql`/`mariadb` client
 binary, which FOG's installer already depends on.
 
+## Goal
+
+FOG does the imaging well; its web GUI is a poor place to find out what
+the server is doing. The questions that come up every day in a lab
+with a few dozen machines take too many clicks, or cannot be answered
+from the GUI at all:
+
+* Which tasks are running right now, and which of them are actually
+  still alive? The GUI drops a task from "Active Tasks" once its
+  check-in is stale, while the host may be halfway through writing the
+  image.
+* Who takes part in a multicast deploy? FOG queues one task per host, so
+  a session of twenty machines shows up as twenty unrelated rows instead
+  of one event with twenty participants.
+* Which hosts have talked to the server recently, and which have gone
+  quiet? FOG keeps no "last seen" column.
+* Which image did each machine last receive, and does that match the
+  image assigned to it now?
+* What happened yesterday? There is no task history beyond the per-host
+  task log pages.
+* Which snapins failed on which hosts?
+
+pyfog answers these from the tables FOG itself writes, without going
+through FOG's PHP object layer or its API, so what it shows is what the
+database holds. Design rules, in order:
+
+1. **Tell the truth.** Read the same rows FOG writes, name the source of
+   every derived value (a stale task, a "last seen" time, a lost imaging
+   run), and say when something cannot be known from here.
+2. **Stay small and readable.** One process, no framework, no
+   dependencies, a few hundred lines per module, plain SQL that anyone
+   can check against FOG's schema.
+3. **Read only.** Only `SELECT`; a database account with `SELECT` on
+   `fog.*` is all it needs.
+4. **Separate data from display.** `pyfog/fog.py` returns plain dicts,
+   the terminal tables are a thin layer on top, and `--json` prints the
+   dicts as they are. A read-only web front end can be built on the
+   data layer later without touching it.
+
+Out of scope: creating, changing or cancelling tasks, hosts or images.
+FOG's GUI and API remain the place for that.
+
 ## Commands
 
 | command                    | answers                                                        |
