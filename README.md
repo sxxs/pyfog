@@ -40,8 +40,8 @@ database holds. Design rules, in order:
 2. **Stay small and readable.** No framework, one dependency, a few
    hundred lines per module, plain SQL that anyone can check against
    FOG's schema.
-3. **Read only.** Only `SELECT`; a database account with `SELECT` on
-   `fog.*` is all it needs.
+3. **Read only.** Only `SELECT`, through its own database account with
+   `SELECT` on `fog.*`; FOG's own account is never used.
 4. **Separate data from display.** `pyfog/fog.py` returns plain dicts,
    the terminal tables are a thin layer on top, and `--json` prints the
    dicts as they are. A read-only web front end can be built on the
@@ -143,28 +143,36 @@ tar xzf pyfog-<version>.tar.gz && sudo pyfog-<version>/install.sh
 ```
 
 `install.sh` installs the distribution's PyMySQL package (apt, dnf, yum
-or pacman), copies the code to `/opt/pyfog`, links `/usr/local/bin/pyfog`
-and ends with `pyfog info` as a check. Running it again updates the
-installation; `--uninstall` removes it. Nothing else is written
-anywhere: no service, no cron job, no config file.
+or pacman), copies the code to `/opt/pyfog`, links `/usr/local/bin/pyfog`,
+creates the database account `fogread` with `SELECT` on `fog.*`, writes
+its credentials to `/etc/pyfog.conf` (owner root, mode 0640) and ends
+with `pyfog info` as a check. The account is not optional: pyfog never
+logs in with FOG's own credentials, and the installer stops if it cannot
+create the account, printing the SQL to run by hand. Options:
 
-Credentials are read from FOG's own `lib/fog/config.class.php` (falling
-back to `/opt/fog/.fogsettings`), so as root nothing needs to be set up.
-For other users, or from another machine, pass `--config PATH`,
-`--db-host/--db-name/--db-user/--db-password`, or set the environment
-variables `PYFOG_DB_HOST`, `PYFOG_DB_NAME`, `PYFOG_DB_USER`,
-`PYFOG_DB_PASSWORD` (`PYFOG_CONFIG` for the config file). Without
-`install.sh`, `bin/pyfog` runs from any checkout with `python3-pymysql`
-installed, and `pip install .` installs a `pyfog` command into a venv.
+* `--password PASSWORD` for the account instead of a random one.
+* `--root-password PASSWORD` when the database root cannot log in
+  through the socket without one.
+* `--group NAME` lets members of that group read `/etc/pyfog.conf`, so
+  they can run pyfog without sudo.
+* `--uninstall` removes the code, the command and the conf; the database
+  account stays.
 
-A dedicated read-only database account is the sensible setup for
-anyone who is not root; `install.sh --reader PASSWORD` creates it, or by
-hand:
+Running the installer again updates the code and keeps the password.
+Nothing else is written anywhere: no service, no cron job.
 
-```sql
-CREATE USER 'fogread'@'localhost' IDENTIFIED BY '...';
-GRANT SELECT ON fog.* TO 'fogread'@'localhost';
-```
+Host and database name come from FOG's own `lib/fog/config.class.php`
+(falling back to `/opt/fog/.fogsettings`), which also tells pyfog where
+the web root and `udp-sender` are. User and password come from
+`/etc/pyfog.conf` (`PYFOG_CONF` names another file). Both can be
+overridden, with the environment variables `PYFOG_DB_HOST`,
+`PYFOG_DB_NAME`, `PYFOG_DB_USER`, `PYFOG_DB_PASSWORD` (`PYFOG_CONFIG` for
+FOG's config file) or the options `--db-host`, `--db-name`, `--db-user`,
+`--db-password`, `--config`; `pyfog info` says where each value came
+from. Without `install.sh`, `bin/pyfog` runs from any checkout with
+`python3-pymysql` installed, and `pip install .` installs a `pyfog`
+command into a venv; both then need the account in the environment or
+on the command line.
 
 `pyfog multicast` and `pyfog clients` read `/proc` and the web server
 access log; both need to run on the FOG server itself (or the storage node
@@ -267,7 +275,8 @@ docker compose down -v                                 # drop the database
 The checkout is mounted into the container, so edits need no rebuild.
 To use the database from the host instead, add a `ports: ["3307:3306"]`
 entry to the `db` service and point `PYFOG_DB_HOST=127.0.0.1:3307`,
-`PYFOG_DB_USER=root`, `PYFOG_DB_PASSWORD=fog`, `PYFOG_DB_NAME=fog` at it.
+`PYFOG_DB_USER=fogread`, `PYFOG_DB_PASSWORD=fogread`, `PYFOG_DB_NAME=fog`
+at it (`tests/reader.sql` creates that account; root is `fog`).
 
 Any other MariaDB or MySQL works the same way; the seed uses
 `NOW()`-relative timestamps, so ages and stale markers come out
@@ -292,9 +301,8 @@ python3 -m pyfog multicast
 `pyfog multicast` then reports the wrapper as alive; with a real
 `udp-sender --portbase 63100 ...` child it lists the sender too.
 
-**3. Against the FOG server.** Create a `SELECT`-only account (see
-Installation), run `pyfog info` to confirm credentials, FOG version and
-schema version, then compare `pyfog tasks` and `pyfog multicast` with
+**3. Against the FOG server.** Run `install.sh` (see Installation), then
+`pyfog info` to confirm the account, FOG version and schema version, then compare `pyfog tasks` and `pyfog multicast` with
 the GUI's Active Tasks page during a deploy. `--debug` prints every SQL
 statement to stderr, which is the fastest way to see why a column or
 row looks different on your installation.

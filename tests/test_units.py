@@ -25,11 +25,40 @@ class ConfigTests(unittest.TestCase):
         finally:
             os.unlink(fh.name)
         self.assertEqual(found["DATABASE_PASSWORD"], "it's\\here")
-        settings = config.Settings(environ={},
-                                   db_host="db.example:3307")
+        settings = config.Settings(environ={"PYFOG_CONF": "/nonexistent"},
+                                   db_host="db.example:3307", db_user="fogread")
         self.assertEqual(settings.hostport, ("db.example", 3307))
 
-    def test_full_overrides_survive_an_unreadable_config(self):
+    def test_fog_config_supplies_host_but_never_the_account(self):
+        php = "<?php define('DATABASE_HOST', 'dbhost'); define('DATABASE_USERNAME', 'fogmaster');"
+        with tempfile.NamedTemporaryFile("w", suffix=".php", delete=False) as fh:
+            fh.write(php)
+        try:
+            with self.assertRaises(config.ConfigError):
+                config.Settings(config=fh.name, environ={"PYFOG_CONF": "/nonexistent"})
+            settings = config.Settings(config=fh.name, environ={"PYFOG_CONF": "/nonexistent"},
+                                       db_user="fogread", db_password="s")
+        finally:
+            os.unlink(fh.name)
+        self.assertEqual(settings.values["DATABASE_HOST"], "dbhost")
+        self.assertEqual(settings.values["DATABASE_USERNAME"], "fogread")
+        self.assertEqual(settings.source, "user, password from command line; host from %s; "
+                                          "database from default" % fh.name)
+
+    def test_conf_below_environment_below_arguments(self):
+        with tempfile.NamedTemporaryFile("w", delete=False) as fh:
+            fh.write("# pyfog\nPYFOG_DB_USER=fogread\nPYFOG_DB_PASSWORD='it''s'\nPYFOG_DB_HOST=confhost\n")
+        try:
+            environ = {"PYFOG_CONF": fh.name, "PYFOG_DB_HOST": "envhost", "PYFOG_CONFIG": "/nonexistent"}
+            settings = config.Settings(environ=environ, db_name="other")
+        finally:
+            os.unlink(fh.name)
+        self.assertEqual(settings.values["DATABASE_PASSWORD"], "it''s")
+        self.assertEqual((settings.values["DATABASE_HOST"], settings.values["DATABASE_NAME"]),
+                         ("envhost", "other"))
+        self.assertEqual(settings.sources["DATABASE_USERNAME"], fh.name)
+
+    def test_unreadable_fog_config_is_not_fatal(self):
         def denied(path):
             raise IOError(13, "Permission denied", path)
         with tempfile.NamedTemporaryFile("w", suffix=".php", delete=False) as fh:
@@ -37,24 +66,24 @@ class ConfigTests(unittest.TestCase):
         original = config.read_php_config
         config.read_php_config = denied
         try:
-            with self.assertRaises(config.ConfigError):
-                config.Settings(config=fh.name, environ={}, db_host="h", db_user="u")
-            settings = config.Settings(config=fh.name, environ={}, db_host="h", db_name="fog",
-                                       db_user="u", db_password="")
+            settings = config.Settings(config=fh.name, environ={"PYFOG_CONF": "/nonexistent"},
+                                       db_user="u")
         finally:
             config.read_php_config = original
             os.unlink(fh.name)
-        self.assertEqual(settings.values["DATABASE_HOST"], "h")
-        self.assertEqual(settings.source, "command line")
+        self.assertEqual(settings.values["DATABASE_HOST"], "localhost")
+        self.assertIn("not readable", settings.sources["DATABASE_HOST"])
 
     def test_fogsettings_fallback_strips_quotes(self):
         with tempfile.NamedTemporaryFile("w", delete=False) as fh:
-            fh.write("## FOG settings\nsnmysqluser='fogmaster'\nsnmysqlpass=\"secret\"\n")
+            fh.write("## FOG settings\nsnmysqlhost='db.example'\nsnmysqluser='fogmaster'\n"
+                     "snmysqlpass=\"secret\"\nwebdirdest=\"/var/www/html/fog\"\n")
         try:
             found = config.read_fogsettings(fh.name)
         finally:
             os.unlink(fh.name)
-        self.assertEqual(found, {"DATABASE_USERNAME": "fogmaster", "DATABASE_PASSWORD": "secret"})
+        # FOG's own account is never picked up, only host and web root.
+        self.assertEqual(found, {"DATABASE_HOST": "db.example", "WEBDIR": "/var/www/html/fog"})
 
 
 class SqlTests(unittest.TestCase):

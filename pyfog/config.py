@@ -1,11 +1,16 @@
-"""Where the FOG database credentials come from.
+"""Where the database connection settings come from.
 
-Order of precedence, highest first:
+The account is pyfog's own read-only one, never FOG's. User and
+password come from, highest first:
 
-    --db-host / --db-name / --db-user / --db-password
-    PYFOG_DB_HOST / PYFOG_DB_NAME / PYFOG_DB_USER / PYFOG_DB_PASSWORD
-    the FOG config file (--config, PYFOG_CONFIG, or the usual locations)
-    /opt/fog/.fogsettings, the installer's answer file
+    --db-user / --db-password
+    PYFOG_DB_USER / PYFOG_DB_PASSWORD
+    /etc/pyfog.conf (or the file PYFOG_CONF names), written by install.sh
+
+Host and database name take the same three, then fall back to FOG's own
+config file (--config, PYFOG_CONFIG, or the usual locations) and to
+/opt/fog/.fogsettings, the installer's answer file, which also tell
+where the web root and udp-sender are.
 """
 
 import errno
@@ -25,6 +30,16 @@ CONFIG_CANDIDATES = (
 )
 
 FOGSETTINGS_CANDIDATES = ("/opt/fog/.fogsettings",)
+
+CONF_PATH = "/etc/pyfog.conf"
+
+# The environment's names, also used inside /etc/pyfog.conf.
+ENV_NAMES = {
+    "DATABASE_HOST": "PYFOG_DB_HOST",
+    "DATABASE_NAME": "PYFOG_DB_NAME",
+    "DATABASE_USERNAME": "PYFOG_DB_USER",
+    "DATABASE_PASSWORD": "PYFOG_DB_PASSWORD",
+}
 
 
 def _php_unquote(value):
@@ -46,15 +61,9 @@ def read_php_config(path):
     return found
 
 
-def read_fogsettings(path):
-    """Fallback: the shell style answer file the installer leaves behind."""
-    mapping = {
-        "snmysqlhost": "DATABASE_HOST",
-        "snmysqluser": "DATABASE_USERNAME",
-        "snmysqlpass": "DATABASE_PASSWORD",
-        "mysqldbname": "DATABASE_NAME",
-        "webdirdest": "WEBDIR",
-    }
+def _assignments(path, mapping):
+    """NAME=value lines of a shell style file, for the names in mapping,
+    keyed by what mapping says; quotes around a value are dropped."""
     found = {}
     with open(path, "r", errors="replace") as handle:
         for line in handle:
@@ -71,74 +80,104 @@ def read_fogsettings(path):
     return found
 
 
+def read_fogsettings(path):
+    """Fallback: the shell style answer file the installer leaves behind.
+    Only host, database name and web root; FOG's account stays unused."""
+    return _assignments(path, {"snmysqlhost": "DATABASE_HOST", "mysqldbname": "DATABASE_NAME",
+                               "webdirdest": "WEBDIR"})
+
+
+def read_conf(path):
+    """/etc/pyfog.conf: PYFOG_DB_*=value lines."""
+    return _assignments(path, {env: key for key, env in ENV_NAMES.items()})
+
+
 class Settings(object):
-    """Resolved connection settings plus where they were found."""
+    """Resolved connection settings plus where each of them was found."""
 
     def __init__(self, config=None, db_host=None, db_name=None, db_user=None,
                  db_password=None, environ=None):
         environ = os.environ if environ is None else environ
-        self.source = None
         self.webroot = None
         self.values = {
             "DATABASE_HOST": "localhost",
             "DATABASE_NAME": "fog",
-            "DATABASE_USERNAME": "fogstorage",
-            "DATABASE_PASSWORD": "",
             "UDPSENDERPATH": "/usr/local/sbin/udp-sender",
         }
+        self.sources = {"DATABASE_HOST": "default", "DATABASE_NAME": "default"}
 
+        # FOG's own files: host, database name, web root, udp-sender path.
+        self.fog_config = None
         candidates = [config or environ.get("PYFOG_CONFIG")]
         if not candidates[0]:
             candidates = list(CONFIG_CANDIDATES)
-        unreadable = None
         for path in candidates:
             if not os.path.isfile(path):
                 continue
             try:
-                self.values.update(read_php_config(path))
+                found = read_php_config(path)
             except IOError as exc:
                 if exc.errno != errno.EACCES:
                     raise
-                unreadable = path
+                self.sources["DATABASE_HOST"] = "default (%s not readable)" % path
                 continue
-            self.source = path
+            self.fog_config = path
             self.webroot = os.path.dirname(os.path.dirname(os.path.dirname(path)))
             break
-
-        if self.source is None:
+        if self.fog_config is None:
             for path in FOGSETTINGS_CANDIDATES:
-                if not os.path.isfile(path):
-                    continue
                 try:
                     found = read_fogsettings(path)
                 except IOError:
                     continue
+                self.fog_config = path
                 self.webroot = found.pop("WEBDIR", None)
-                self.values.update(found)
-                self.source = path
                 break
+        if self.fog_config:
+            for key in ("DATABASE_HOST", "DATABASE_NAME", "UDPSENDERPATH", "MULTICASTINTERFACE"):
+                if key in found:
+                    self.values[key] = found[key]
+                    self.sources[key] = self.fog_config
 
-        overrides = (
-            ("DATABASE_HOST", db_host, environ.get("PYFOG_DB_HOST")),
-            ("DATABASE_NAME", db_name, environ.get("PYFOG_DB_NAME")),
-            ("DATABASE_USERNAME", db_user, environ.get("PYFOG_DB_USER")),
-            ("DATABASE_PASSWORD", db_password, environ.get("PYFOG_DB_PASSWORD")),
-        )
-        overridden = set()
-        for key, from_args, from_env in overrides:
-            if from_args is not None:
-                self.values[key] = from_args
-                self.source = self.source or "command line"
-                overridden.add(key)
-            elif from_env:
-                self.values[key] = from_env
-                self.source = self.source or "environment"
-                overridden.add(key)
-        # A user with their own SELECT account may name every credential
-        # and never needs FOG's root-only config file.
-        if unreadable and len(overridden) < len(overrides):
-            raise ConfigError("%s is not readable; run as root or pass all --db-* options"
-                              % unreadable)
+        # pyfog's own account, and any overrides: conf < environment < args.
+        conf_path = environ.get("PYFOG_CONF") or CONF_PATH
+        try:
+            layers = [(read_conf(conf_path), conf_path)]
+        except IOError:
+            layers = []
+        layers.append(({key: environ[env] for key, env in ENV_NAMES.items() if environ.get(env)},
+                       "environment"))
+        layers.append(({key: value for key, value in (
+            ("DATABASE_HOST", db_host), ("DATABASE_NAME", db_name),
+            ("DATABASE_USERNAME", db_user), ("DATABASE_PASSWORD", db_password))
+            if value is not None}, "command line"))
+        for values, source in layers:
+            for key, value in values.items():
+                self.values[key] = value
+                self.sources[key] = source
+        if "DATABASE_USERNAME" not in self.values:
+            raise ConfigError(
+                "no database account: put PYFOG_DB_USER and PYFOG_DB_PASSWORD into %s "
+                "(install.sh does that), or set them in the environment, or pass "
+                "--db-user and --db-password" % conf_path)
+        self.values.setdefault("DATABASE_PASSWORD", "")
+        self.sources.setdefault("DATABASE_PASSWORD", self.sources["DATABASE_USERNAME"])
+
+    @property
+    def source(self):
+        """Where the settings came from, for pyfog info."""
+        labels = {"DATABASE_USERNAME": "user", "DATABASE_PASSWORD": "password",
+                  "DATABASE_HOST": "host", "DATABASE_NAME": "database"}
+        by_source = []
+        for key, label in labels.items():
+            source = self.sources[key]
+            for entry in by_source:
+                if entry[0] == source:
+                    entry[1].append(label)
+                    break
+            else:
+                by_source.append((source, [label]))
+        return "; ".join("%s from %s" % (", ".join(names), source) for source, names in by_source)
 
     @property
     def hostport(self):

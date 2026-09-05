@@ -15,6 +15,7 @@ services:
       # Run in name order on first start, into the fog database.
       - ./tests/fog-schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
       - ./tests/seed.sql:/docker-entrypoint-initdb.d/20-seed.sql:ro
+      - ./tests/reader.sql:/docker-entrypoint-initdb.d/30-reader.sql:ro
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 3s
@@ -27,8 +28,8 @@ services:
         condition: service_healthy
     environment:
       PYFOG_DB_HOST: db
-      PYFOG_DB_USER: root
-      PYFOG_DB_PASSWORD: fog
+      PYFOG_DB_USER: fogread      # SELECT only, like on a real server
+      PYFOG_DB_PASSWORD: fogread
       PYFOG_DB_NAME: fog
     volumes:
       - .:/app   # edits on the host are visible without a rebuild

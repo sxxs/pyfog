@@ -414,7 +414,7 @@ def info(data, palette, out=sys.stdout):
         ("FOG version", data["fog_version"] or "unknown (web root not found)"),
         ("Schema version", data["schema_version"]),
         ("Database", data["database"]),
-        ("Credentials from", data["config_source"]),
+        ("Settings from", data["config_source"]),
         ("Server time", data["server_time"]),
         ("Check-in timeout", "%d s" % data["checkin_timeout"]),
         ("Client interval", "%d s" % data["client_checkin_interval"]),
