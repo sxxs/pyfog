@@ -49,12 +49,15 @@ each one is optional and independent of the others:
   tasks. The script cancels them as the database root, and only reports
   unless told to apply. See [Cleaning up lost
   tasks](#cleaning-up-lost-tasks).
-* **`patches/`** — one patch for FOG 1.5.10's multicast manager. FOG
-  ends a multicast session the moment `udp-sender` exits, while the
-  receivers are still writing the image, so their completion reports are
-  refused; the patch makes the manager wait for the hosts instead. That race is the usual
-  source of the lost imaging runs pyfog reports. See [A patch for FOG's
-  multicast manager](#a-patch-for-fogs-multicast-manager).
+* **`patches/`** — two patches for FOG 1.5.10's web code, both applied
+  on the server, neither touching the FOG client. One makes the multicast
+  manager wait for the hosts instead of ending a session the moment
+  `udp-sender` exits, while the receivers are still writing the image and
+  their completion reports get refused: that race is the usual source of
+  the lost imaging runs pyfog reports. The other narrows the random
+  offset the server adds to every client's check-in interval from 1-91 to
+  1-11 seconds. See [Patches for the FOG
+  server](#patches-for-the-fog-server).
 * **`systemd/`** — `fog.target` and `fog.slice`, one switch to start,
   stop and inspect FOG's seven services and its web server together
   instead of one unit at a time. It changes nothing about how FOG works.
@@ -258,7 +261,8 @@ installation.
   host whose completion report FOG refused. pyfog looks up the task that
   was current when the run started: Complete, but without the `taskLog`
   row the host writes on completion, means the server closed it first
-  (see the patch section below).
+  (see [the multicast
+  patch](#the-multicast-manager-ends-a-session-too-early)).
 * **Multicast**: FOG queues one task per participating host and links
   them to the session through `multicastSessionsAssoc`. pyfog folds
   them back into one entry. The pid FOG stores in `msSenderPID` is the
@@ -292,14 +296,17 @@ installation.
   a warning when the server's own clock differs.
 * **FOG client intervals** (`pyfog info`): the client asks the server for
   its configuration on every cycle (`lib/fog/fogpage.class.php`,
-  `requestClientInfo`), and the server answers with
-  `FOG_CLIENT_CHECKIN_TIME` plus a random 1 to 91 seconds as the next
-  sleep, and `FOG_GRACE_TIMEOUT` as the reboot countdown. Both are global
-  settings; FOG keeps no per-host or per-group values for them. The
-  client (fog-client 0.13) accepts a sleep of 30 to 7200 s and a countdown
-  of 60 to 600 s and silently uses 60 s outside those ranges, so a
-  countdown below a minute cannot be configured, and the shortest
-  possible check-in is 31 to 121 s.
+  `configure` and `requestClientInfo`), and the server answers with
+  `FOG_CLIENT_CHECKIN_TIME` plus a random offset as the next sleep, and
+  `FOG_GRACE_TIMEOUT` as the reboot countdown. Both are global settings;
+  FOG keeps no per-host or per-group values for them. The offset is a
+  literal in FOG's source (`mt_rand(1, 91)` as shipped, `mt_rand(1, 11)`
+  with the [patch](#the-server-adds-up-to-91-seconds-to-every-check-in)),
+  so pyfog reads the pair out of the web root instead of assuming it, and
+  says so when the web root cannot be read. The client (fog-client 0.13)
+  accepts a sleep of 30 to 7200 s and a countdown of 60 to 600 s and
+  silently uses 60 s outside those ranges, so a countdown below a minute
+  cannot be configured.
 * **History**: `taskLog` gets a row when a task goes In-Progress and one
   when it completes; `history` shows those as start and end.
 * **Snapins**: `snapinTasks` holds state, exit code and the details
@@ -339,7 +346,14 @@ host could not write, so `pyfog deployments` and `pyfog history` show
 the deploy. The comment at the top of the file has the exact rules;
 `pyfog tasks` and `pyfog deployments` show the result.
 
-## A patch for FOG's multicast manager
+## Patches for the FOG server
+
+Two patches, both against FOG 1.5.10's PHP code in the web root, both
+applied with `patch -p3` from there, and both independent of each other
+and of pyfog itself. Neither touches the FOG client: the client is left
+as it is, and only what the server sends it changes.
+
+### The multicast manager ends a session too early
 
 `patches/fog-multicast-grace-period.patch` fixes a race in FOG 1.5.10's
 `FOGMulticastManager` that pyfog makes visible as imaging runs FOG lost
@@ -369,6 +383,44 @@ cleanly there; `--dry-run` tells you whether it does on yours. The
 service log (`/opt/fog/log/multicast.log`) then shows "sender finished,
 waiting up to N seconds for the hosts to report" at the end of a
 session.
+
+### The server adds up to 91 seconds to every check-in
+
+`patches/fog-client-checkin-jitter.patch` narrows the random offset the
+server puts on top of `FOG_CLIENT_CHECKIN_TIME`.
+
+The client asks the server for its configuration on every cycle and is
+told how long to sleep before the next one. FOG does not send the
+configured value: `lib/fog/fogpage.class.php` answers with
+`FOG_CLIENT_CHECKIN_TIME + mt_rand(1, 91)`, in both places the client can
+ask (`configure()` for the plain-text answer, `requestClientInfo()` for
+the JSON one). The offset spreads the hosts so that they do not all call
+in at the same second, which matters for a site with thousands of them.
+With a few dozen machines it buys nothing and costs up to a minute and a
+half on every check-in, and with it every task pickup, which is the wait
+that makes a queued task look stuck. The window is a literal in FOG's
+source; there is no setting for it.
+
+The patch replaces both with `mt_rand(1, 11)`, so a check-in time of 29 s
+means a sleep of 30 to 40 s instead of 30 to 120 s. Change the 11 in the
+patch before applying it for a different window.
+
+```
+cd /var/www/html/fog          # wherever lib/fog/fogpage.class.php is
+patch -p3 --dry-run < /path/to/pyfog/patches/fog-client-checkin-jitter.patch
+patch -p3 < /path/to/pyfog/patches/fog-client-checkin-jitter.patch
+```
+
+No service needs restarting; PHP picks the file up on the next request,
+and each host takes the new value at its next check-in. `pyfog info`
+reads the window out of the web root and reports it, so the line under
+"FOG client" says what the server actually sends.
+
+One bound comes from the client and stays: fog-client 0.13 discards a
+sleep below 30 s (or above 7200 s) and uses 60 s instead, so
+`FOG_CLIENT_CHECKIN_TIME` has to stay at 29 or more — a smaller check-in
+time gets you slower check-ins, not faster ones. `pyfog info` marks that
+in red when the setting is too low.
 
 ## One unit for all FOG services
 
@@ -411,7 +463,7 @@ pyfog/cli.py        argument parsing and wiring
 tests/               python3 -m unittest
 install.sh           installer for the FOG server
 sql/lost-tasks.sql   cleanup of tasks FOG lost track of, run as database root
-patches/             fix for FOG's multicast manager, applied on the FOG server
+patches/             two fixes for FOG's web code, applied on the FOG server
 systemd/             fog.target, fog.slice: all FOG services and apache2 as one unit
 Makefile             make test, make smoke, make dist
 ```

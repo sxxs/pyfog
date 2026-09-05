@@ -12,4 +12,4 @@ Layers:
 A later web front end should import fog.Fog and nothing else.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"

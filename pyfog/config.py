@@ -200,3 +200,29 @@ class Settings(object):
         except IOError:
             return None
         return match.group(1) if match else None
+
+    def client_jitter(self):
+        """The random offset FOG adds to FOG_CLIENT_CHECKIN_TIME before it
+        sends the client its sleep, read from the web root.
+
+        lib/fog/fogpage.class.php adds mt_rand(1, 91) to the check-in time in
+        both answers the client gets, configure() and requestClientInfo().
+        It is a literal in FOG's source with no setting behind it, and
+        patches/fog-client-checkin-jitter.patch narrows it, so the pair is
+        read instead of assumed. Returns (low, high), or None when the file
+        cannot be read or the two call sites disagree, so the caller can say
+        that rather than guess.
+        """
+        if not self.webroot:
+            return None
+        path = os.path.join(self.webroot, "lib", "fog", "fogpage.class.php")
+        try:
+            with open(path, "r", errors="replace") as handle:
+                text = handle.read()
+        except IOError:
+            return None
+        found = set(re.findall(r"\+\s*mt_rand\(\s*(\d+)\s*,\s*(\d+)\s*\)", text))
+        if len(found) != 1:
+            return None
+        low, high = found.pop()
+        return int(low), int(high)

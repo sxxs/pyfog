@@ -754,21 +754,31 @@ class Fog(object):
         per-group check-in or grace time.
 
         lib/fog/fogpage.class.php requestClientInfo() answers the client's
-        configure call with sleep = FOG_CLIENT_CHECKIN_TIME + mt_rand(1, 91)
-        and promptTime = FOG_GRACE_TIMEOUT. fog-client 0.13
-        (Service/FOGSystemService.cs, Zazzles/AbstractService.cs) accepts a
-        sleep of 30..7200 s and a prompt of 60..600 s; anything else is
-        logged as invalid and replaced by 60 s.
+        configure call with sleep = FOG_CLIENT_CHECKIN_TIME + a random
+        offset (mt_rand(1, 91) as FOG ships it) and promptTime =
+        FOG_GRACE_TIMEOUT. fog-client 0.13 (Service/FOGSystemService.cs,
+        Zazzles/AbstractService.cs) accepts a sleep of 30..7200 s and a
+        prompt of 60..600 s; anything else is logged as invalid and replaced
+        by 60 s.
+
+        The offset is a literal in FOG's source, so it is read from the web
+        root (Settings.client_jitter); patches/fog-client-checkin-jitter.patch
+        narrows it, and the answer says which of the two it is.
         """
         checkin = to_int(self.setting("FOG_CLIENT_CHECKIN_TIME"))
         grace = to_int(self.setting("FOG_GRACE_TIMEOUT"))
         sleep_accepted, grace_accepted = (30, 7200), (60, 600)
+        jitter = self.settings.client_jitter()
+        low, high = jitter if jitter else (1, 91)
+        sent = (checkin + low, checkin + high)
         return {
             "checkin_time": checkin,
-            "sleep_sent": (checkin + 1, checkin + 91),
+            "jitter": (low, high),
+            "jitter_source": "web root" if jitter else "FOG 1.5.10 default, web root not read",
+            "sleep_sent": sent,
             "sleep_accepted": sleep_accepted,
             "sleep_effective": tuple(s if sleep_accepted[0] <= s <= sleep_accepted[1] else 60
-                                     for s in (checkin + 1, checkin + 91)),
+                                     for s in sent),
             "grace_timeout": grace,
             "grace_accepted": grace_accepted,
             "grace_effective": grace if grace_accepted[0] <= grace <= grace_accepted[1] else 60,

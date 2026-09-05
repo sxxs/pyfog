@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import unittest
@@ -90,6 +91,31 @@ class ConfigTests(unittest.TestCase):
         # FOG's own account is never picked up, only host and web root.
         self.assertEqual(found, {"DATABASE_HOST": "db.example", "WEBDIR": "/var/www/html/fog"})
 
+
+    def test_client_jitter_is_read_from_the_web_root(self):
+        root = tempfile.mkdtemp()
+        fogdir = os.path.join(root, "lib", "fog")
+        os.makedirs(fogdir)
+        conf = os.path.join(fogdir, "config.class.php")
+        page = os.path.join(fogdir, "fogpage.class.php")
+        with open(conf, "w") as fh:
+            fh.write("<?php define('DATABASE_HOST', 'dbhost');")
+        settings = config.Settings(config=conf, environ={"PYFOG_CONF": "/nonexistent"},
+                                   db_user="fogread", db_password="s")
+        self.assertEqual(settings.webroot, root)
+        # No fogpage.class.php: nothing is guessed.
+        self.assertIsNone(settings.client_jitter())
+        # Both call sites patched to the same window.
+        with open(page, "w") as fh:
+            fh.write("<?php\n$a = array_shift($Services) + mt_rand(1, 11);\n"
+                     "$vals = array('sleep' => $checkin + mt_rand(1, 11));\n")
+        self.assertEqual(settings.client_jitter(), (1, 11))
+        # Only one of the two patched: pyfog says it does not know.
+        with open(page, "w") as fh:
+            fh.write("<?php\n$a = array_shift($Services) + mt_rand(1, 11);\n"
+                     "$vals = array('sleep' => $checkin + mt_rand(1, 91));\n")
+        self.assertIsNone(settings.client_jitter())
+        shutil.rmtree(root)
 
 class SqlTests(unittest.TestCase):
     def test_queries_use_pymysql_placeholders(self):
@@ -209,6 +235,46 @@ class ClockTests(unittest.TestCase):
         self.assertEqual(f.now(), rows_dt(rows["db"]))
         self.assertIn("time zone tables", f._now_source)
 
+
+class ClientSettingsTests(unittest.TestCase):
+    """What pyfog info reports about the client's check-in interval, with and
+    without patches/fog-client-checkin-jitter.patch on the server."""
+
+    class FakeDB(object):
+        def __init__(self, settings):
+            self._settings = settings
+
+        def query(self, sql, params=()):
+            return [{"settingKey": k, "settingValue": v} for k, v in self._settings.items()]
+
+    class FakeSettings(object):
+        def __init__(self, jitter):
+            self._jitter = jitter
+
+        def client_jitter(self):
+            return self._jitter
+
+    def _client(self, jitter, checkin="29"):
+        db = self.FakeDB({"FOG_CLIENT_CHECKIN_TIME": checkin, "FOG_GRACE_TIMEOUT": "300"})
+        return fog.Fog(db, self.FakeSettings(jitter)).client_settings()
+
+    def test_narrowed_jitter_from_the_web_root(self):
+        c = self._client((1, 11))
+        self.assertEqual(c["jitter"], (1, 11))
+        self.assertEqual(c["sleep_sent"], (30, 40))
+        self.assertEqual(c["sleep_effective"], (30, 40))
+        self.assertEqual(c["jitter_source"], "web root")
+
+    def test_unread_web_root_falls_back_to_the_shipped_window_and_says_so(self):
+        c = self._client(None)
+        self.assertEqual(c["sleep_sent"], (30, 120))
+        self.assertIn("web root not read", c["jitter_source"])
+
+    def test_check_in_time_below_the_client_floor_shows_the_replacement(self):
+        # 20 + 1 = 21 s is under the client's minimum of 30 s, so it uses 60 s.
+        c = self._client((1, 11), checkin="20")
+        self.assertEqual(c["sleep_sent"], (21, 31))
+        self.assertEqual(c["sleep_effective"], (60, 31))
 
 class SenderMatchingTests(unittest.TestCase):
     def session(self, **kw):

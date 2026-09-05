@@ -1,0 +1,32 @@
+diff --git a/packages/web/lib/fog/fogpage.class.php b/packages/web/lib/fog/fogpage.class.php
+index 23dcf49..5a6cc67 100644
+--- a/packages/web/lib/fog/fogpage.class.php
++++ b/packages/web/lib/fog/fogpage.class.php
+@@ -3316,7 +3316,15 @@ abstract class FOGPage extends FOGBase
+             . "#maxsize=%d\n"
+             . "#promptTime=%d\n"
+             . "#force=%s",
+-            array_shift($Services) + mt_rand(1, 91),
++            // pyfog: FOG spreads the clients over a 91 second window so
++            // that they do not all call in at the same second. In a lab of
++            // a few dozen machines that spread is not needed and only
++            // delays every check-in and every task pickup by up to a
++            // minute and a half. 1 to 11 seconds still keeps them apart.
++            // The client discards a sleep below 30 s and uses 60 s
++            // instead, so FOG_CLIENT_CHECKIN_TIME must stay at 29 or
++            // more. The same value is used in requestClientInfo() below.
++            array_shift($Services) + mt_rand(1, 11),
+             array_shift($Services),
+             array_shift($Services),
+             array_shift($Services)
+@@ -3539,7 +3547,9 @@ abstract class FOGPage extends FOGBase
+                 ''
+             );
+             $vals = array(
+-                'sleep' => $checkin + mt_rand(1, 91),
++                // pyfog: a 1 to 11 second spread instead of 1 to 91,
++                // see the comment in configure() above.
++                'sleep' => $checkin + mt_rand(1, 11),
+                 'maxsize' => $maxsize,
+                 'promptTime' => $timeout,
+                 'force' => (bool)$freboot,

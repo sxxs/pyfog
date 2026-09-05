@@ -518,8 +518,10 @@ def info(data, palette, out=sys.stdout, sort=None):
     ], palette, out, indent="")
     c = data["client"]
     out.write("\n" + palette.bold("FOG client (global; FOG has no per-host or per-group values)") + "\n")
-    sleep = "%d s set; the server sends %d-%d s (it adds a random 1-91 s)" % (
-        c["checkin_time"], c["sleep_sent"][0], c["sleep_sent"][1])
+    sleep = "%d s set; the server sends %d-%d s (it adds a random %d-%d s%s)" % (
+        c["checkin_time"], c["sleep_sent"][0], c["sleep_sent"][1],
+        c["jitter"][0], c["jitter"][1],
+        "" if c["jitter_source"] == "web root" else "; " + c["jitter_source"])
     if c["sleep_effective"] != c["sleep_sent"]:
         sleep += palette.red("; the client accepts %d-%d s and uses 60 s for anything outside"
                              % c["sleep_accepted"])
