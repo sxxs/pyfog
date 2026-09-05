@@ -1,6 +1,7 @@
 """Unit tests for the parts that need no database. Run: python3 -m unittest"""
 
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -8,7 +9,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from pyfog import cli, config, db, fog, local, render, util  # noqa: E402
+from pyfog import cli, config, fog, local, render, util  # noqa: E402
 
 
 class ConfigTests(unittest.TestCase):
@@ -37,14 +38,14 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(found, {"DATABASE_USERNAME": "fogmaster", "DATABASE_PASSWORD": "secret"})
 
 
-class DatabaseTests(unittest.TestCase):
-    def test_quote_and_inline(self):
-        self.assertEqual(db.sql_quote("a'b\\c"), "'a\\'b\\\\c'")
-        self.assertEqual(db.sql_quote(None), "NULL")
-        self.assertEqual(db.inline("x = ? AND y = ?", [3, "z"]), "x = 3 AND y = 'z'")
-
-    def test_batch_unescape(self):
-        self.assertEqual(db._unescape_batch("a\\tb\\nc\\\\d"), "a\tb\nc\\d")
+class SqlTests(unittest.TestCase):
+    def test_queries_use_pymysql_placeholders(self):
+        # A literal % in SQL text would break PyMySQL's parameter substitution.
+        import inspect
+        source = inspect.getsource(fog)
+        self.assertNotIn("?", re.sub(r'"""[\s\S]*?"""', "", source).split("class Fog")[0])
+        for chunk in re.findall(r"%[^s(]", fog.TASK_SQL + fog.SESSION_SQL):
+            self.fail("stray %% in SQL: %r" % chunk)
 
 
 class UtilTests(unittest.TestCase):

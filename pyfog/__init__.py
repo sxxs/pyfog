@@ -3,7 +3,7 @@
 Layers:
 
     config.py   where the database credentials come from
-    db.py       SELECT-only MySQL access (PyMySQL or the mysql client)
+    db.py       SELECT-only queries through PyMySQL
     local.py    facts read from this machine: /proc, web server logs, udpcast logs
     fog.py      the data layer: plain dicts describing tasks, hosts, images ...
     render.py   terminal presentation of those dicts

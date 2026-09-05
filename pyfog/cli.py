@@ -170,10 +170,9 @@ def main(argv=None):
     except (ConfigError, DatabaseError) as exc:
         sys.stderr.write("pyfog: %s\n" % exc)
         return 2
-    api = fog.Fog(db, settings)
     try:
         while True:
-            data, show, kwargs = collect(api, args)
+            data, show, kwargs = collect(fog.Fog(db, settings), args)
             if args.json:
                 json.dump(data, sys.stdout, indent=2, ensure_ascii=False)
                 sys.stdout.write("\n")
@@ -185,7 +184,6 @@ def main(argv=None):
                 return 0
             sys.stdout.flush()
             time.sleep(args.watch)
-            db._now = None
     except (DatabaseError, LookupError, ValueError) as exc:
         sys.stderr.write("pyfog: %s\n" % exc)
         return 1

@@ -5,8 +5,8 @@ server. It reads FOG's MySQL tables directly (plus `/proc` and the web
 server log on the FOG host) and shows what the web GUI makes tedious to
 find out. It never writes to the database and never calls the FOG API.
 
-Python 3.6+, standard library only. Needs the `mysql`/`mariadb` client
-binary, which FOG's installer already depends on.
+Python 3.6+ and [PyMySQL](https://pypi.org/project/PyMySQL/), nothing
+else (`apt install python3-pymysql` on Debian/Ubuntu).
 
 ## Goal
 
@@ -37,9 +37,9 @@ database holds. Design rules, in order:
 1. **Tell the truth.** Read the same rows FOG writes, name the source of
    every derived value (a stale task, a "last seen" time, a lost imaging
    run), and say when something cannot be known from here.
-2. **Stay small and readable.** One process, no framework, no
-   dependencies, a few hundred lines per module, plain SQL that anyone
-   can check against FOG's schema.
+2. **Stay small and readable.** No framework, one dependency, a few
+   hundred lines per module, plain SQL that anyone can check against
+   FOG's schema.
 3. **Read only.** Only `SELECT`; a database account with `SELECT` on
    `fog.*` is all it needs.
 4. **Separate data from display.** `pyfog/fog.py` returns plain dicts,
@@ -89,10 +89,10 @@ pc04  10.0.0.14  Win11-Lab  deploy  2026-09-05 08:25:55  41m 46s  none (FOG lost
 
 ## Installation
 
-Copy the directory onto the FOG server and run `bin/pyfog`, or
-`python3 -m pyfog` from inside it. `pip install .` installs a `pyfog`
-command instead. There are no Python dependencies (`requirements.txt`
-lists the system requirements). Credentials are read from FOG's own
+Copy the directory onto the FOG server, install PyMySQL from the distro
+(`python3-pymysql`) or into a venv (`pip install -r requirements.txt`),
+and run `bin/pyfog` or `python3 -m pyfog`. `pip install .` installs a
+`pyfog` command instead. Credentials are read from FOG's own
 `lib/fog/config.class.php` (falling back to `/opt/fog/.fogsettings`), so
 run it as root or as a user that may read that file. Alternatives:
 `--config PATH`, `--db-host/--db-name/--db-user/--db-password`, or the
@@ -160,7 +160,7 @@ and the `$databaseFields` maps in `packages/web/lib/fog/*.class.php`.
 ```
 bin/pyfog            launcher for running from a checkout
 pyfog/config.py     credential discovery
-pyfog/db.py         SELECT-only queries through the mysql client
+pyfog/db.py         SELECT-only queries through PyMySQL
 pyfog/local.py      /proc, access log, udpcast log
 pyfog/fog.py        data layer: plain dicts, no printing
 pyfog/render.py     tables for the terminal
