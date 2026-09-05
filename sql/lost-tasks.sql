@@ -10,8 +10,11 @@
 --                  it counts as lost (default 12)
 --   @open_imaging  what to do with imagingLog rows that never got a finish
 --                  time: 'delete' (default; nothing proves the host
---                  finished) or 'close' (set the finish time to the start
---                  time, so the deploy still counts in `pyfog deployments`)
+--                  finished) or 'close' (the host did finish, FOG's
+--                  multicast manager closed its task before it could
+--                  report: the finish time becomes the host's last
+--                  progress report, the host's deploy time is set, and the
+--                  task log gets the Complete row the host could not write)
 --
 -- What counts as lost, in the order it is cleaned:
 --   1. tasks still Queued, Checked In or In-Progress that were created
@@ -64,9 +67,18 @@ WHERE ms.msState IN (0, 1, 2, 3)
                     AND t.taskHostID IN (SELECT taskHostID FROM live_hosts));
 
 CREATE TEMPORARY TABLE lost_imaging AS
-SELECT il.ilID, il.ilHostID, h.hostName, il.ilImageName, il.ilType, il.ilStartTime
+SELECT il.ilID, il.ilHostID, h.hostName, il.ilImageName, il.ilType, il.ilStartTime,
+       lt.taskID AS lastTaskID, ts.tsName AS lastState,
+       (lt.taskStateID = 4 AND NOT EXISTS (SELECT 1 FROM taskLog l
+            WHERE l.taskID = lt.taskID AND l.taskStateID = 4)) AS closedByServer,
+       GREATEST(il.ilStartTime, COALESCE(lt.taskCheckIn, il.ilStartTime)) AS finish
 FROM imagingLog il
 LEFT JOIN hosts h ON h.hostID = il.ilHostID
+LEFT JOIN tasks lt ON lt.taskID = (
+    SELECT t2.taskID FROM tasks t2
+    WHERE t2.taskHostID = il.ilHostID AND t2.taskCreateTime <= il.ilStartTime
+    ORDER BY t2.taskCreateTime DESC, t2.taskID DESC LIMIT 1)
+LEFT JOIN taskStates ts ON ts.tsID = lt.taskStateID
 WHERE il.ilFinishTime = '0000-00-00 00:00:00'
   AND il.ilStartTime < @cutoff
   AND il.ilHostID NOT IN (SELECT taskHostID FROM live_hosts);
@@ -88,7 +100,12 @@ UNION ALL
 SELECT 'multicast session', msID, msName, CONCAT(msPercent, '%'), msStartDateTime, NULL
 FROM lost_sessions
 UNION ALL
-SELECT 'imaging run', ilID, hostName, CONCAT(ilType, ' ', ilImageName), ilStartTime, NULL
+SELECT 'imaging run', ilID, hostName,
+       CONCAT(ilType, ' ', ilImageName,
+              IF(lastTaskID IS NULL, ', no task',
+                 CONCAT(', task ', lastTaskID, ' ', lastState,
+                        IF(closedByServer, ' (closed by server before the host reported)', '')))),
+       ilStartTime, IF(@open_imaging = 'close', finish, NULL)
 FROM lost_imaging
 UNION ALL
 SELECT 'snapin job', sjID, hostName, NULL, sjCreateTime, NULL FROM lost_snapin_jobs
@@ -107,8 +124,17 @@ WHERE msID IN (SELECT msID FROM lost_sessions) AND @dry_run = 0;
 DELETE FROM imagingLog
 WHERE ilID IN (SELECT ilID FROM lost_imaging) AND @dry_run = 0 AND @open_imaging = 'delete';
 
-UPDATE imagingLog SET ilFinishTime = ilStartTime
-WHERE ilID IN (SELECT ilID FROM lost_imaging) AND @dry_run = 0 AND @open_imaging = 'close';
+UPDATE imagingLog il JOIN lost_imaging li ON li.ilID = il.ilID
+SET il.ilFinishTime = li.finish
+WHERE @dry_run = 0 AND @open_imaging = 'close';
+
+UPDATE hosts h JOIN lost_imaging li ON li.ilHostID = h.hostID
+SET h.hostLastDeploy = li.finish
+WHERE @dry_run = 0 AND @open_imaging = 'close' AND li.ilType = 'down' AND h.hostLastDeploy < li.finish;
+
+INSERT INTO taskLog (taskID, taskStateID, ip, createTime, createdBy)
+SELECT lastTaskID, 4, '', finish, 'lost-tasks.sql' FROM lost_imaging
+WHERE @dry_run = 0 AND @open_imaging = 'close' AND closedByServer;
 
 UPDATE snapinTasks SET stState = 5
 WHERE stJobID IN (SELECT sjID FROM lost_snapin_jobs) AND stState IN (0, 1, 2, 3) AND @dry_run = 0;

@@ -257,6 +257,9 @@ class Fog(object):
                 duration=int((finished - started).total_seconds())
                 if started and finished else None,
                 result="ok" if task["state_id"] == COMPLETE else "cancelled",
+                # Complete without the host's own completion row: the server
+                # closed it (see imaging_open).
+                reported=finished is not None,
             )
             entries.append(task)
         return entries
@@ -303,11 +306,21 @@ class Fog(object):
             SELECT il.ilID, il.ilHostID, h.hostName, h.hostIP, il.ilImageName, il.ilType,
                    il.ilStartTime, il.ilCreatedBy,
                    (SELECT COUNT(*) FROM tasks t WHERE t.taskHostID = il.ilHostID
-                      AND t.taskStateID IN """ + ACTIVE + """) AS activeTasks
+                      AND t.taskStateID IN """ + ACTIVE + """) AS activeTasks,
+                   lt.taskID AS lastTaskID, lt.taskStateID AS lastState, ts.tsName AS lastStateName,
+                   tt.ttName AS lastType, lt.taskCheckIn AS lastCheckIn, lt.taskPCT AS lastPercent,
+                   (SELECT COUNT(*) FROM taskLog l WHERE l.taskID = lt.taskID
+                      AND l.taskStateID = %s) AS reported
             FROM imagingLog il
             LEFT JOIN hosts h ON h.hostID = il.ilHostID
+            LEFT JOIN tasks lt ON lt.taskID = (
+                SELECT t2.taskID FROM tasks t2
+                WHERE t2.taskHostID = il.ilHostID AND t2.taskCreateTime <= il.ilStartTime
+                ORDER BY t2.taskCreateTime DESC, t2.taskID DESC LIMIT 1)
+            LEFT JOIN taskStates ts ON ts.tsID = lt.taskStateID
+            LEFT JOIN taskTypes tt ON tt.ttID = lt.taskTypeID
             WHERE il.ilFinishTime IN ('0000-00-00 00:00:00', '')
-            ORDER BY il.ilStartTime DESC""")
+            ORDER BY il.ilStartTime DESC""", [COMPLETE])
         return [{
             "id": r["ilID"],
             "host": r["hostName"],
@@ -319,6 +332,21 @@ class Fog(object):
             "age": seconds_since(r["ilStartTime"], self.now()),
             "created_by": text(r["ilCreatedBy"]),
             "has_task": r["activeTasks"] > 0,
+            # The task that was current when the run started. A Complete
+            # task without the taskLog row the host writes on completion
+            # was closed by the server (FOG's multicast manager does that
+            # as soon as udp-sender exits) before the host could report.
+            "task": None if r["lastTaskID"] is None else {
+                "id": r["lastTaskID"],
+                "type": r["lastType"],
+                "state": r["lastStateName"] or str(r["lastState"]),
+                "state_id": r["lastState"],
+                "active": r["lastState"] in ACTIVE_STATES,
+                "percent": r["lastPercent"],
+                "last_checkin": dt_text(r["lastCheckIn"]),
+                "reported": r["reported"] > 0,
+                "closed_by_server": r["lastState"] == COMPLETE and r["reported"] == 0,
+            },
         } for r in rows]
 
     # -- multicast ----------------------------------------------------------

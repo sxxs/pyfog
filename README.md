@@ -124,7 +124,7 @@ MC1  3 hosts: Lab-A  -          Multi-Cast  2 In-Progress, 1 Queued  Win11-Lab  
 Imaging runs the hosts reported as started but not finished:
 HOST  IP         IMAGE      KIND    STARTED                  AGE  TASK
 pc01  10.0.0.11  Win11-Lab  deploy  2026-09-05 09:00:55   6m 46s  yes
-pc04  10.0.0.14  Win11-Lab  deploy  2026-09-05 08:25:55  41m 46s  none (FOG lost track)
+pc04  10.0.0.14  Win11-Lab  deploy  2026-09-05 08:25:55  41m 46s  9 closed by server before the host reported; last report 2026-09-05 08:30
 ```
 
 ## Installation
@@ -194,7 +194,11 @@ and the `$databaseFields` maps in `packages/web/lib/fog/*.class.php`.
 * **Imaging runs** come from `imagingLog`, which the host itself opens at
   the start of imaging and closes at the end
   (`lib/reg-task/taskingelement.class.php`). An open row without an
-  active task is a host still imaging after FOG lost track of it.
+  active task is a host still imaging after FOG lost track of it, or a
+  host whose completion report FOG refused. pyfog looks up the task that
+  was current when the run started: Complete, but without the `taskLog`
+  row the host writes on completion, means the server closed it first
+  (see the patch section below).
 * **Multicast**: FOG queues one task per participating host and links
   them to the session through `multicastSessionsAssoc`. pyfog folds
   them back into one entry. The pid FOG stores in `msSenderPID` is the
@@ -245,11 +249,14 @@ mysql fog -e "SET @hours = 3; SET @open_imaging = 'close'; SOURCE sql/lost-tasks
 lost (12 by default). Lost tasks become Cancelled with a `taskLog` row
 naming the script, sessions Cancelled with a completion time, so FOG's
 multicast service stops their `udp-sender`. Imaging runs without a
-finish time are deleted, because nothing proves the host finished;
-`@open_imaging = 'close'` keeps them with the start time as finish time
-instead, so the deploy still counts in `pyfog deployments`. The comment
-at the top of the file has the exact rules; `pyfog tasks` and
-`pyfog deployments` show the result.
+finish time are deleted, because nothing proves the host finished.
+`@open_imaging = 'close'` is for the case the section below describes,
+where the hosts did finish and only their report was refused: the run
+is closed with the host's last progress report as finish time, the
+host's deploy time is set, and the task log gets the Complete row the
+host could not write, so `pyfog deployments` and `pyfog history` show
+the deploy. The comment at the top of the file has the exact rules;
+`pyfog tasks` and `pyfog deployments` show the result.
 
 ## A patch for FOG's multicast manager
 
@@ -340,8 +347,9 @@ Any other MariaDB or MySQL works the same way; the seed uses
 `NOW()`-relative timestamps, so ages and stale markers come out
 plausible whenever it is loaded. What to expect from the seed: task 1
 running, task 2 checked in but silent (stale), task 3 queued, tasks 4
-to 6 folded into multicast session 1, pc04 imaging without a task, a
-failed snapin on pc01, and pc02 silent for two days in `clients`.
+to 6 folded into multicast session 1, pc04 with an imaging run whose task
+the server closed before the host reported (task 9), a failed snapin on
+pc01, and pc02 silent for two days in `clients`.
 
 The multicast process check needs real processes in the same container
 as pyfog. To exercise it, start a stand-in sender the way FOG does and

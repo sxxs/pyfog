@@ -170,9 +170,22 @@ def imaging_section(runs, palette, out):
     table = Table("HOST", "IP", "IMAGE", "KIND", "STARTED", ">AGE", "TASK")
     for run in runs:
         table.add(run["host"], run["ip"], run["image"], run["kind"], run["started"],
-                  age_text(run["age"]),
-                  "yes" if run["has_task"] else palette.red("none (FOG lost track)"))
+                  age_text(run["age"]), _imaging_task(run, palette))
     table.write(out, palette)
+
+
+def _imaging_task(run, palette):
+    """What became of the task behind an imaging run that never finished."""
+    if run["has_task"]:
+        return "yes"
+    task = run.get("task")
+    if task is None:
+        return palette.red("none (FOG lost track)")
+    if task["closed_by_server"]:
+        last = short_dt(task["last_checkin"]) if task["last_checkin"] else "never"
+        return palette.red("%d closed by server before the host reported; last report %s"
+                           % (task["id"], last))
+    return palette.red("%d %s" % (task["id"], task["state"]))
 
 
 def orphan_section(procs, palette, out):
@@ -399,12 +412,14 @@ def history(data, palette, out=sys.stdout, expand=False):
 
 
 def _finished(task, palette):
-    """FOG logs no time for a cancellation, so the last sign of life stands in."""
+    """FOG logs no time for a cancellation, and none for a task the server
+    closed itself, so the last sign of life stands in."""
     if task["finished"]:
         return short_dt(task["finished"])
-    if task["last_checkin"]:
-        return palette.dim("silent since " + short_dt(task["last_checkin"]))
-    return palette.dim("never checked in")
+    last = short_dt(task["last_checkin"]) if task["last_checkin"] else None
+    if task["result"] == "ok":
+        return palette.dim("closed by server" + (", last report " + last if last else ""))
+    return palette.dim("silent since " + last if last else "never checked in")
 
 
 def scheduled(data, palette, out=sys.stdout):
