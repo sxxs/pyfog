@@ -1,5 +1,6 @@
 """Unit tests for the parts that need no database. Run: python3 -m unittest"""
 
+import json
 import os
 import re
 import sys
@@ -134,6 +135,23 @@ class CliTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             cli.parse_states("bogus")
 
+    def test_view_args_keep_global_options(self):
+        args = cli.build_parser().parse_args(["--no-color", "--db-host", "x", "dashboard"])
+        view = cli.view_args(args, "tasks")
+        self.assertEqual((view.command, view.expand, view.no_color, view.db_host),
+                         ("tasks", True, True, "x"))
+        self.assertEqual(cli.view_args(args, "clients").command, "clients")
+        self.assertEqual(sorted(name for _, name in cli.VIEWS),
+                         sorted(("tasks", "multicast", "history", "scheduled", "clients",
+                                 "deployments", "images", "hosts", "groups", "snapins", "info")))
+
+    def test_dashboard_refreshes_only_on_a_terminal(self):
+        parser = cli.build_parser()
+        self.assertIsNone(cli.refresh_interval(parser.parse_args(["dashboard", "--once"])))
+        self.assertIsNone(cli.refresh_interval(parser.parse_args(["dashboard", "--json"])))
+        self.assertEqual(cli.refresh_interval(parser.parse_args(["tasks", "--watch", "5"])), 5)
+        self.assertIsNone(cli.refresh_interval(parser.parse_args(["tasks"])))
+
     def test_global_options_work_after_the_subcommand(self):
         parser = cli.build_parser()
         self.assertTrue(parser.parse_args(["tasks", "--json"]).json)
@@ -153,6 +171,26 @@ class RenderTests(unittest.TestCase):
         out = _Buffer()
         table.write(out, render.Palette(False))
         self.assertTrue(all(len(line) <= 200 for line in out.text.splitlines()))
+
+    def test_dashboard_renders_the_fixture(self):
+        with open(os.path.join(os.path.dirname(__file__), "dashboard.json")) as fh:
+            data = json.load(fh)
+        out = _Buffer()
+        render.dashboard(data, render.Palette(False), out)
+        for expected in ("Active tasks: 6", "1 stale", "1 imaging run without a task",
+                         "MC1", "Multicast session 1", "Recently finished tasks", "Scheduled tasks"):
+            self.assertIn(expected, out.text)
+
+    def test_frame_never_scrolls_or_wraps(self):
+        text = "\n".join("line %d, %s" % (i, "x" * 40) for i in range(40))
+        frame = render.frame(text, size=(20, 10))
+        self.assertTrue(frame.startswith("\033[H"))
+        self.assertTrue(frame.endswith("\033[K\033[J"))
+        self.assertEqual(frame.count("\n"), 9)
+        self.assertIn("31 more lines", frame)
+        lines = render.ANSI.sub("", frame.replace("\033[H", "").replace("\033[J", "")).split("\n")
+        self.assertTrue(all(len(line.replace("\033[K", "")) <= 20 for line in lines))
+        self.assertEqual(render.frame("a\nb", size=(20, 10)), "\033[Ha\033[K\nb\033[K\033[J")
 
 
 class _Buffer(object):

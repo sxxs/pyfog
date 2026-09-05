@@ -1,14 +1,23 @@
 """Command line wiring: parse arguments, call the data layer, print."""
 
 import argparse
+import io
 import json
 import os
+import select
 import sys
+import termios
 import time
+import tty
 
 from . import __version__, fog, render
 from .config import ConfigError, Settings
 from .db import Database, DatabaseError
+
+# Keys that switch the live screen to another command's output.
+VIEWS = [("t", "tasks"), ("m", "multicast"), ("h", "history"), ("s", "scheduled"),
+         ("c", "clients"), ("d", "deployments"), ("i", "images"), ("o", "hosts"),
+         ("g", "groups"), ("n", "snapins"), ("f", "info")]
 
 STATE_WORDS = {"queued": [fog.QUEUED, fog.CHECKED_IN], "running": [fog.IN_PROGRESS],
                "complete": [fog.COMPLETE], "cancelled": [fog.CANCELLED],
@@ -39,7 +48,7 @@ def build_parser():
                                 argparse.ArgumentParser(parents=[common], **kw))
     sub.required = True
 
-    p = sub.add_parser("tasks", help="tasks that are queued or running (multicast folded per session)")
+    p = sub.add_parser("tasks", help="tasks that are queued or running (one line per multicast session)")
     p.add_argument("--state", help="active (default), queued, running, complete, cancelled, all, or ids")
     p.add_argument("--host", help="host name or IP contains")
     p.add_argument("--image", help="image name contains")
@@ -69,8 +78,8 @@ def build_parser():
     p.add_argument("--log", action="append", help="web server access log (repeatable)")
     p.add_argument("--log-bytes", type=int, default=32 * 1024 * 1024,
                    help="how much of each log's tail to read")
-    p.add_argument("--stale", type=int, metavar="MINUTES", help="mark hosts silent for longer")
-    p.add_argument("--only-stale", action="store_true", help="with --stale: list only those")
+    p.add_argument("--stale", type=int, metavar="MINUTES", help="mark hosts silent for longer than MINUTES")
+    p.add_argument("--only-stale", action="store_true", help="with --stale: list only the hosts marked silent")
 
     p = sub.add_parser("deployments", help="imaging log: who got which image when")
     p.add_argument("--host")
@@ -94,6 +103,15 @@ def build_parser():
     p.add_argument("--limit", type=int, default=200)
 
     sub.add_parser("info", help="versions, connection, counts, storage nodes")
+
+    p = sub.add_parser("dashboard", help="one screen of live state, redrawn every few seconds; "
+                       "single keys switch to the other commands' output")
+    p.add_argument("--interval", type=int, default=3, metavar="SECONDS",
+                   help="seconds between refreshes (default 3)")
+    p.add_argument("--once", action="store_true",
+                   help="print one screen and exit (implied when the output is not a terminal)")
+    p.add_argument("--recent", type=int, default=8, metavar="N",
+                   help="how many finished tasks to list (default 8)")
     return parser
 
 
@@ -157,7 +175,16 @@ def collect(api, args):
         return data, render.snapins, {}
     if args.command == "info":
         return api.info(), render.info, {}
+    if args.command == "dashboard":
+        return api.dashboard(args.recent), render.dashboard, {}
     raise ValueError(args.command)
+
+
+def refresh_interval(args):
+    """Seconds between redraws, or None for a single run."""
+    if args.command == "dashboard":
+        return None if args.once or args.json or not sys.stdout.isatty() else args.interval
+    return getattr(args, "watch", None)
 
 
 def main(argv=None):
@@ -171,19 +198,17 @@ def main(argv=None):
         sys.stderr.write("pyfog: %s\n" % exc)
         return 2
     try:
-        while True:
-            data, show, kwargs = collect(fog.Fog(db, settings), args)
-            if args.json:
-                json.dump(data, sys.stdout, indent=2, ensure_ascii=False)
-                sys.stdout.write("\n")
-            else:
-                if getattr(args, "watch", None):
-                    sys.stdout.write("\033[2J\033[H")
-                show(data, palette, **kwargs)
-            if not getattr(args, "watch", None):
-                return 0
-            sys.stdout.flush()
-            time.sleep(args.watch)
+        interval = refresh_interval(args)
+        if interval:
+            db, watched = None, db
+            return watch(args, settings, watched, palette, interval)
+        data, show, kwargs = collect(fog.Fog(db, settings), args)
+        if args.json:
+            json.dump(data, sys.stdout, indent=2, ensure_ascii=False)
+            sys.stdout.write("\n")
+        else:
+            show(data, palette, **kwargs)
+        return 0
     except (DatabaseError, LookupError, ValueError) as exc:
         sys.stderr.write("pyfog: %s\n" % exc)
         return 1
@@ -194,4 +219,112 @@ def main(argv=None):
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         return 0
     finally:
-        db.close()
+        if db is not None:
+            db.close()
+
+
+def view_args(args, command):
+    """Arguments for another command's view, with this run's global options."""
+    view = build_parser().parse_args([command])
+    for name in ("json", "no_color", "debug", "config", "db_host", "db_name", "db_user",
+                 "db_password"):
+        setattr(view, name, getattr(args, name))
+    if command == "tasks":
+        view.expand = True
+    return view
+
+
+class Keys(object):
+    """Single key presses from a terminal on stdin, or nothing at all.
+
+    Puts the terminal into cbreak mode (keys arrive without Enter, Ctrl-C
+    still works) and restores it on exit. When stdin is not a terminal,
+    for example `ssh host pyfog dashboard` without -t, read() only waits.
+    """
+
+    def __init__(self):
+        self.fd = sys.stdin.fileno() if sys.stdin.isatty() else None
+        self.saved = None
+
+    def __enter__(self):
+        if self.fd is not None:
+            self.saved = termios.tcgetattr(self.fd)
+            tty.setcbreak(self.fd)
+        return self
+
+    def __exit__(self, *exc):
+        if self.saved is not None:
+            termios.tcsetattr(self.fd, termios.TCSADRAIN, self.saved)
+
+    @property
+    def enabled(self):
+        return self.fd is not None
+
+    def read(self, timeout):
+        """One key within timeout seconds, or None. Escape sequences (arrow
+        keys and the like) are swallowed; a lone Escape comes back as "esc"."""
+        if self.fd is None:
+            time.sleep(max(0.0, timeout))
+            return None
+        ready, _, _ = select.select([self.fd], [], [], max(0.0, timeout))
+        if not ready:
+            return None
+        data = os.read(self.fd, 16)
+        if data == b"\x1b":
+            return "esc"
+        return data.decode("ascii", "replace").lower() if len(data) == 1 else None
+
+
+def watch(args, settings, db, palette, interval):
+    """Redraw the command's output every `interval` seconds until q or Ctrl-C.
+
+    The first line of the screen is a status line owned by this loop. A
+    failed query does not end the loop: the last good screen stays up
+    with the error in the status line, and the next round reconnects.
+    Keys switch to another command's output (see VIEWS); x, Escape or
+    Home return to the command this started with.
+    """
+    home, current, body = args, args, ""
+    try:
+        with Keys() as keys:
+            key_line = "  ".join("%s %s" % (key, name) for key, name in VIEWS) \
+                + "  x back  q quit"
+            while True:
+                started = time.monotonic()
+                try:
+                    if db is None:
+                        db = Database(settings, debug=args.debug)
+                    data, show, kwargs = collect(fog.Fog(db, settings), current)
+                    if args.json:
+                        body = json.dumps(data, indent=2, ensure_ascii=False)
+                    else:
+                        out = io.StringIO()
+                        show(data, palette, out=out, **kwargs)
+                        body = out.getvalue()
+                    status = palette.dim("pyfog %s  refreshed %s in %d ms, every %ds" % (
+                        current.command, time.strftime("%H:%M:%S"),
+                        (time.monotonic() - started) * 1000, interval))
+                except DatabaseError as exc:
+                    status = palette.red("pyfog %s  %s  database error, retrying every %ds: %s" % (
+                        current.command, time.strftime("%H:%M:%S"), interval, exc))
+                    if db is not None:
+                        db.close()
+                    db = None
+                if keys.enabled and not args.json:
+                    status += "\n" + palette.dim(key_line)
+                sys.stdout.write(render.frame(status + "\n" + body))
+                sys.stdout.flush()
+                key = keys.read(interval - (time.monotonic() - started))
+                if key == "q":
+                    sys.stdout.write("\n")
+                    return 0
+                if key in ("x", "esc"):
+                    current = home
+                elif key in dict(VIEWS):
+                    current = view_args(args, dict(VIEWS)[key])
+    except KeyboardInterrupt:
+        sys.stdout.write("\n")
+        return 130
+    finally:
+        if db is not None:
+            db.close()

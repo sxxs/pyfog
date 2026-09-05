@@ -1,8 +1,8 @@
 # pyfog
 
 Read-only command line view on a [FOG](https://fogproject.org) imaging
-server. It reads FOG's MySQL tables directly (plus `/proc` and the web
-server log on the FOG host) and shows what the web GUI makes tedious to
+server. It reads FOG's MySQL tables directly (plus the process list and
+the web server log on the FOG host) and shows what the web GUI makes tedious to
 find out. It never writes to the database and never calls the FOG API.
 
 Python 3.6+ and [PyMySQL](https://pypi.org/project/PyMySQL/), nothing
@@ -17,7 +17,7 @@ from the GUI at all:
 
 * Which tasks are running right now, and which of them are actually
   still alive? The GUI drops a task from "Active Tasks" once its
-  check-in is stale, while the host may be halfway through writing the
+  check-in is stale (older than the check-in timeout), while the host may be halfway through writing the
   image.
 * Who takes part in a multicast deploy? FOG queues one task per host, so
   a session of twenty machines shows up as twenty unrelated rows instead
@@ -31,12 +31,12 @@ from the GUI at all:
 * Which snapins failed on which hosts?
 
 pyfog answers these from the tables FOG itself writes, without going
-through FOG's PHP object layer or its API, so what it shows is what the
+through FOG's own PHP code or its API, so what pyfog shows is what the
 database holds. Design rules, in order:
 
 1. **Tell the truth.** Read the same rows FOG writes, name the source of
    every derived value (a stale task, a "last seen" time, a lost imaging
-   run), and say when something cannot be known from here.
+   run), and say when something cannot be known from the database.
 2. **Stay small and readable.** No framework, one dependency, a few
    hundred lines per module, plain SQL that anyone can check against
    FOG's schema.
@@ -54,7 +54,7 @@ FOG's GUI and API remain the place for that.
 
 | command                    | answers                                                        |
 |----------------------------|----------------------------------------------------------------|
-| `pyfog tasks`             | what is queued or running right now; multicast folded into one line per session; imaging runs FOG lost track of |
+| `pyfog tasks`             | what is queued or running right now; one line per multicast session; imaging runs FOG lost track of |
 | `pyfog task <id>`         | one task in detail, with every host imaging alongside it (multicast session or group batch) |
 | `pyfog history`           | finished tasks with start/end times from `taskLog`, newest first |
 | `pyfog scheduled`         | delayed and cron tasks FOG will create later                    |
@@ -67,10 +67,49 @@ FOG's GUI and API remain the place for that.
 | `pyfog groups`            | groups and their members                                        |
 | `pyfog snapins`           | snapin runs per host with exit codes (`--failed` for the bad ones) |
 | `pyfog info`              | versions, connection, counts, storage nodes                     |
+| `pyfog dashboard`         | one screen of what is live: tasks, multicast, imaging runs, recent history, scheduled tasks; redrawn every 3 s, single keys switch to the other commands |
 
 Every command takes `--json` for machine readable output; `tasks` and
 `multicast` take `--watch SECONDS`. `pyfog <command> --help` lists the
 filters.
+
+### The dashboard
+
+`pyfog dashboard` shows active tasks (multicast sessions with their
+hosts), imaging runs FOG lost track of, each active multicast session
+with its sender process, the last few finished tasks and the pending
+scheduled tasks, and redraws every 3 seconds (`--interval`). It is meant
+to be left open in an ssh session on the FOG server, so it keeps
+terminal control to a minimum:
+
+* It does not switch to a separate screen the way `less` or `top` do,
+  and it never clears the whole screen. Each refresh is one write that
+  puts the cursor back in the top left corner and overwrites line by
+  line, so the screen updates in place without flashing, and what was on
+  screen stays there after Ctrl-C.
+* Lines that do not fit the terminal are dropped and counted in the
+  last row (`… 13 more lines`); the screen never scrolls. Tables
+  shrink their widest columns to the terminal width.
+* A lost database connection does not end the dashboard. The last good
+  screen stays up with the error in the status line, and every refresh
+  tries to reconnect.
+* Colour follows `--no-color` and `NO_COLOR`; there is nothing else in
+  the way of terminal control.
+
+The first line is the status line: the time of the last refresh by the
+clock of the machine running pyfog (the heading below it shows the
+database server's time), how long the queries took, and the interval.
+The second line lists the keys. One letter switches the screen to
+another command's output, refreshed at the same interval, so the other
+commands can be found without remembering their names: `t` tasks (one
+line per host), `m` multicast, `h` history, `s` scheduled, `c` clients,
+`d` deployments, `i` images, `o` hosts, `g` groups, `n` snapins, `f`
+info. `x` or Escape returns to the dashboard, `q` quits. The keys need
+a terminal on standard input (`ssh -t` when running the command straight
+from ssh); without one the dashboard only refreshes. With `--once`, or
+when the output is not a terminal, it prints one screen and exits.
+`--json` prints the same data as one dict. The web server access log is not
+read, so "last seen" per client stays with `pyfog clients`.
 
 ```
 $ pyfog tasks
@@ -112,9 +151,9 @@ running the sender) to see those.
 
 ## Where the answers come from
 
-FOG's web GUI goes through its PHP object layer and the API; pyfog reads
+FOG's web GUI goes through FOG's own PHP classes and the API; pyfog reads
 the same tables the GUI writes, so a task that vanished from "Active Tasks"
-but is still in `tasks` shows up here. Column names and their meaning were
+but is still in `tasks` still shows up in pyfog. Column names and their meaning were
 taken from FOG 1.5.10 (branch `stable`): `packages/web/commons/schema.php`
 and the `$databaseFields` maps in `packages/web/lib/fog/*.class.php`.
 
@@ -194,6 +233,7 @@ server (`python3-pymysql` from apt):
 ```
 docker compose run --rm pyfog tasks                    # any command
 docker compose run --rm pyfog --json multicast
+docker compose run --rm pyfog dashboard                # live, Ctrl-C to quit
 docker compose run --rm --entrypoint tests/smoke.sh pyfog
 docker compose down -v                                 # drop the database
 ```

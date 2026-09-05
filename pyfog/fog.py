@@ -665,6 +665,37 @@ class Fog(object):
             } for n in nodes],
         }
 
+    # -- dashboard ----------------------------------------------------------
+
+    def dashboard(self, recent=8):
+        """Everything one screen of live state needs, in one dict.
+
+        Active tasks (folded per multicast session), imaging runs without
+        a task, the active multicast sessions with their sender processes,
+        the last few finished tasks and the pending scheduled tasks. The
+        access log is deliberately not read here: parsing it every few
+        seconds would cost more than it tells.
+        """
+        tasks = self.tasks()
+        states, stale = {}, 0
+        for task in tasks:
+            states[task["state"]] = states.get(task["state"], 0) + 1
+            stale += task["stale"]
+        multicast = self.multicast()
+        return {
+            "now": dt_text(self.now()),
+            "timeout": self.checkin_timeout(),
+            "count": len(tasks),
+            "states": states,
+            "stale": stale,
+            "entries": group_multicast(tasks),
+            "imaging_open": self.imaging_open(),
+            "sessions": multicast["sessions"],
+            "orphan_senders": multicast["orphan_senders"],
+            "recent": group_multicast(self.history(limit=recent)),
+            "scheduled": [s for s in self.scheduled() if s["active"]],
+        }
+
 
 def group_multicast(tasks):
     """Fold the per-host rows of a multicast session into one entry.

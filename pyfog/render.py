@@ -140,9 +140,17 @@ def tasks(data, palette, out=sys.stdout, expand=False):
     heading = "Tasks: %d  (server time %s, check-in timeout %ds)" % (
         data["count"], data["now"], data["timeout"])
     out.write(palette.bold(heading) + "\n")
+    task_table(data["entries"], palette, expand).write(out, palette)
+    if data["imaging_open"]:
+        out.write("\n" + palette.bold("Imaging runs the hosts reported as started but not finished:") + "\n")
+        imaging_table(data["imaging_open"], palette).write(out, palette)
+
+
+def task_table(entries, palette, expand=False):
+    """One row per task; a multicast session is one row, or a row plus its hosts."""
     table = Table(">ID", "HOST", "IP", "TYPE", "STATE", "IMAGE", "PROGRESS",
                   ">ELAPSED", ">LEFT", "NODE", "CREATED", ">CHECK-IN", "FLAGS")
-    for entry in data["entries"]:
+    for entry in entries:
         if "session" in entry:
             table.add("MC%d" % entry["session"], "%d hosts: %s" % (len(entry["tasks"]), entry["name"]),
                       "", entry["type"], _session_states(entry, palette), entry["image"],
@@ -153,15 +161,16 @@ def tasks(data, palette, out=sys.stdout, expand=False):
             rows = [entry]
         for task in rows:
             _task_row(table, task, palette, indent="  " if "session" in entry else "")
-    table.write(out, palette)
-    if data["imaging_open"]:
-        out.write("\n" + palette.bold("Imaging runs the hosts reported as started but not finished:") + "\n")
-        table = Table("HOST", "IP", "IMAGE", "KIND", "STARTED", ">AGE", "TASK")
-        for run in data["imaging_open"]:
-            table.add(run["host"], run["ip"], run["image"], run["kind"], run["started"],
-                      age_text(run["age"]),
-                      "yes" if run["has_task"] else palette.red("none (FOG lost track)"))
-        table.write(out, palette)
+    return table
+
+
+def imaging_table(runs, palette):
+    table = Table("HOST", "IP", "IMAGE", "KIND", "STARTED", ">AGE", "TASK")
+    for run in runs:
+        table.add(run["host"], run["ip"], run["image"], run["kind"], run["started"],
+                  age_text(run["age"]),
+                  "yes" if run["has_task"] else palette.red("none (FOG lost track)"))
+    return table
 
 
 def _session_states(entry, palette):
@@ -236,13 +245,13 @@ def session_summary(s, palette, out):
     if not s["sender_pid"]:
         sender = "not started yet"
     elif "wrapper_alive" not in s:
-        sender = "wrapper pid %d on node %s (see: pyfog multicast)" % (s["sender_pid"], s["sender_node"])
+        sender = "wrapper shell pid %d on node %s (see: pyfog multicast)" % (s["sender_pid"], s["sender_node"])
     elif not s["sender_local"]:
         sender = "on node %s (%s), not checkable from here" % (s["sender_node"], s["sender_address"])
     elif s["wrapper_alive"]:
-        sender = "wrapper pid %d alive since %s" % (s["sender_pid"], s["sender_started"])
+        sender = "wrapper shell pid %d alive since %s" % (s["sender_pid"], s["sender_started"])
     else:
-        sender = palette.red("wrapper pid %d recorded but gone" % s["sender_pid"])
+        sender = palette.red("wrapper shell pid %d recorded but gone" % s["sender_pid"])
     _pairs([
         ("State", palette.state(s["state"], s["active"])),
         ("Image", s["image"]),
@@ -410,3 +419,60 @@ def info(data, palette, out=sys.stdout):
         table.add(n["name"], n["address"], n["group"], "master" if n["master"] else "node",
                   n["interface"], n["max_clients"], "yes" if n["enabled"] else palette.red("no"))
     table.write(out, palette)
+
+
+# -- dashboard ------------------------------------------------------------
+
+
+def dashboard(data, palette, out=sys.stdout):
+    """One screen of live state; data from Fog.dashboard()."""
+    heading = "FOG dashboard  server time %s, check-in timeout %ds" % (data["now"], data["timeout"])
+    out.write(palette.bold(heading) + "\n")
+    states = ["%d %s" % (n, state) for state, n in sorted(data["states"].items())]
+    if data["stale"]:
+        states.append(palette.red("%d stale" % data["stale"]))
+    parts = ["Active tasks: %d" % data["count"] + (" (%s)" % ", ".join(states) if states else "")]
+    if data["sessions"]:
+        parts.append("%d multicast session%s" % (len(data["sessions"]),
+                                                  "" if len(data["sessions"]) == 1 else "s"))
+    lost = sum(1 for run in data["imaging_open"] if not run["has_task"])
+    if lost:
+        parts.append(palette.red("%d imaging run%s without a task" % (lost, "" if lost == 1 else "s")))
+    if data["orphan_senders"]:
+        parts.append(palette.red("%d udp-sender without a session" % len(data["orphan_senders"])))
+    out.write("  ".join(parts) + "\n\n")
+
+    task_table(data["entries"], palette, expand=True).write(out, palette)
+    if data["imaging_open"]:
+        out.write("\n" + palette.bold("Imaging runs reported as started but not finished") + "\n")
+        imaging_table(data["imaging_open"], palette).write(out, palette)
+    for s in data["sessions"]:
+        out.write("\n")
+        session_summary(s, palette, out)
+    if data["orphan_senders"]:
+        out.write("\n" + palette.red("udp-sender processes no active session claims:") + "\n")
+        for proc in data["orphan_senders"]:
+            out.write("  pid %d: portbase %s, file %s, since %s\n" % (
+                proc["pid"], proc.get("portbase"), proc.get("file"), proc["started"]))
+    if data["recent"]:
+        out.write("\n" + palette.bold("Recently finished tasks") + "\n")
+        history(data["recent"], palette, out)
+    if data["scheduled"]:
+        out.write("\n" + palette.bold("Scheduled tasks") + "\n")
+        scheduled(data["scheduled"], palette, out)
+
+
+def frame(text, size=None):
+    """Turn rendered text into one screen update for a terminal.
+
+    Built for slow links and ssh sessions: no alternate screen, no full
+    clear, no cursor games. The cursor goes home, every line overwrites
+    its predecessor to the end of the line, and whatever the previous
+    frame left below is cleared once. Lines that do not fit the terminal
+    are dropped and counted in the last row, so the screen never scrolls.
+    """
+    columns, rows = size or shutil.get_terminal_size((160, 25))
+    lines = [_clip(line, columns) for line in text.rstrip("\n").split("\n")]
+    if len(lines) > rows:
+        lines = lines[:rows - 1] + ["… %d more lines" % (len(lines) - rows + 1)]
+    return "\033[H" + "\033[K\n".join(lines) + "\033[K\033[J"
