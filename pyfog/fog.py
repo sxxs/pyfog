@@ -626,7 +626,7 @@ class Fog(object):
             "database": "%s@%s/%s" % (self.settings.values["DATABASE_USERNAME"],
                                       self.settings.values["DATABASE_HOST"],
                                       self.settings.values["DATABASE_NAME"]),
-            "backend": self.db.backend,
+            "client": self.db.client,
             "server_time": dt_text(self.now()),
             "checkin_timeout": self.checkin_timeout(),
             "client_checkin_interval": to_int(self.db.setting("FOG_CLIENT_CHECKIN_TIME")),
