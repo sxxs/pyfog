@@ -8,6 +8,58 @@ find out. It never writes to the database and never calls the FOG API.
 Python 3.6+ and [PyMySQL](https://pypi.org/project/PyMySQL/), nothing
 else (`apt install python3-pymysql` on Debian/Ubuntu).
 
+## Built against
+
+pyfog reads FOG's tables directly, so the FOG release it was written
+against is a compatibility fact and not a footnote. Everything here was
+built and tested against this combination:
+
+| component | version |
+|---|---|
+| FOG | 1.5.10, branch `stable`, build 1.5.10.2253 |
+| FOG client | 0.13 |
+| database | MariaDB 10.11 |
+| Python | 3.6 or newer, PyMySQL 0.9 or newer |
+| FOG host | Debian/Ubuntu with apache2; the installers also know dnf, yum, pacman and httpd |
+
+Every column name and every rule about what a value means was taken from
+that release: `packages/web/commons/schema.php` and the
+`$databaseFields` maps in `packages/web/lib/fog/*.class.php`.
+`tests/fog-schema.sql` is that layout, dumped after running all 279 of
+its migration steps, and the patch in `patches/` is a diff against its
+source.
+
+On a different FOG version pyfog still only ever issues `SELECT`, so the
+worst case is a renamed column and an error message, not damage. Start
+with `pyfog info`, which prints the server's own FOG version and schema
+version, and use `--debug` to see the statement behind anything that
+looks wrong.
+
+This is finished work, kept as it is and not under active development.
+
+## What is in this repo
+
+Reading the database is the whole of pyfog. Three small extras sit next
+to the command because they came out of running the same FOG server;
+each one is optional and independent of the others:
+
+* **`sql/lost-tasks.sql`** — pyfog only reads, but what it shows as lost
+  has to be cleaned up somewhere: tasks that stay active in the database
+  after FOG stopped listing them, and that block their host from new
+  tasks. The script cancels them as the database root, and only reports
+  unless told to apply. See [Cleaning up lost
+  tasks](#cleaning-up-lost-tasks).
+* **`patches/`** — one patch for FOG 1.5.10's multicast manager. FOG
+  ends a multicast session the moment `udp-sender` exits, while the
+  receivers are still writing the image, so their completion reports are
+  refused; the patch makes the manager wait for the hosts instead. That race is the usual
+  source of the lost imaging runs pyfog reports. See [A patch for FOG's
+  multicast manager](#a-patch-for-fogs-multicast-manager).
+* **`systemd/`** — `fog.target` and `fog.slice`, one switch to start,
+  stop and inspect FOG's seven services and its web server together
+  instead of one unit at a time. It changes nothing about how FOG works.
+  See [One unit for all FOG services](#one-unit-for-all-fog-services).
+
 ## Goal
 
 FOG does the imaging well; its web GUI is a poor place to find out what
@@ -189,9 +241,10 @@ running the sender) to see those.
 
 FOG's web GUI goes through FOG's own PHP classes and the API; pyfog reads
 the same tables the GUI writes, so a task that vanished from "Active Tasks"
-but is still in `tasks` still shows up in pyfog. Column names and their meaning were
-taken from FOG 1.5.10 (branch `stable`): `packages/web/commons/schema.php`
-and the `$databaseFields` maps in `packages/web/lib/fog/*.class.php`.
+but is still in `tasks` still shows up in pyfog. Column names and their meaning come from
+FOG 1.5.10 (see [Built against](#built-against)); each item below names
+the FOG file it was read from, so it can be checked against your own
+installation.
 
 * **Tasks** are `tasks` joined with `hosts`, `images`, `taskStates`,
   `taskTypes` and the storage node. A task is marked *stale* when its
@@ -359,7 +412,7 @@ tests/               python3 -m unittest
 install.sh           installer for the FOG server
 sql/lost-tasks.sql   cleanup of tasks FOG lost track of, run as database root
 patches/             fix for FOG's multicast manager, applied on the FOG server
-systemd/             fog.target: start and stop all FOG services and apache2 at once
+systemd/             fog.target, fog.slice: all FOG services and apache2 as one unit
 Makefile             make test, make smoke, make dist
 ```
 
