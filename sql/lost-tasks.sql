@@ -2,10 +2,12 @@
 -- pyfog's account. The default is a dry run that only lists what would
 -- change:
 --
---   mysql fog < lost-tasks.sql                              (report only)
---   mysql fog -e "SET @dry_run = 0; SOURCE lost-tasks.sql"  (clean up)
+--   mysql fog < lost-tasks.sql                                        (report only)
+--   mysql --init-command="SET @dry_run = 0" fog < lost-tasks.sql       (clean up)
 --
--- Knobs, set before SOURCE the same way:
+-- (--init-command sets session variables before the file runs; it works
+-- with the mysql and the mariadb client alike, unlike SOURCE after a
+-- semicolon in -e.) Knobs, set the same way, comma separated:
 --   @hours         how long a task or imaging run may stay silent before
 --                  it counts as lost (default 12)
 --   @open_imaging  what to do with imagingLog rows that never got a finish
