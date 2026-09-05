@@ -226,6 +226,31 @@ and the `$databaseFields` maps in `packages/web/lib/fog/*.class.php`.
   `up` a capture. `--current` compares the last finished deploy per host
   with the image assigned in `hosts.hostImage`.
 
+## Cleaning up lost tasks
+
+pyfog only reads, but what it shows as lost has to be cleaned up
+somewhere: tasks FOG stopped listing while they stay active in the
+database (and block the host from new tasks), multicast sessions whose
+hosts are all gone, imaging runs without a finish time, snapin jobs
+nobody will pick up. `sql/lost-tasks.sql` does that, as the database
+root, and by default only reports:
+
+```
+mysql fog < sql/lost-tasks.sql                                 # report
+mysql fog -e "SET @dry_run = 0; SOURCE sql/lost-tasks.sql"     # apply
+mysql fog -e "SET @hours = 3; SET @open_imaging = 'close'; SOURCE sql/lost-tasks.sql"
+```
+
+`@hours` says how long something may stay silent before it counts as
+lost (12 by default). Lost tasks become Cancelled with a `taskLog` row
+naming the script, sessions Cancelled with a completion time, so FOG's
+multicast service stops their `udp-sender`. Imaging runs without a
+finish time are deleted, because nothing proves the host finished;
+`@open_imaging = 'close'` keeps them with the start time as finish time
+instead, so the deploy still counts in `pyfog deployments`. The comment
+at the top of the file has the exact rules; `pyfog tasks` and
+`pyfog deployments` show the result.
+
 ## Layout
 
 ```
@@ -238,6 +263,7 @@ pyfog/render.py     tables for the terminal
 pyfog/cli.py        argument parsing and wiring
 tests/               python3 -m unittest
 install.sh           installer for the FOG server
+sql/lost-tasks.sql   cleanup of tasks FOG lost track of, run as database root
 Makefile             make test, make smoke, make dist
 ```
 
