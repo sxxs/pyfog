@@ -227,8 +227,11 @@ class CliTests(unittest.TestCase):
         self.assertEqual(cli.Keys.decode(b"\x1b"), "esc")
         self.assertEqual(cli.Keys.decode(b"\x1b[H"), "home")
         self.assertEqual(cli.Keys.decode(b"\x1bOH"), "home")
-        self.assertIsNone(cli.Keys.decode(b"\x1b[A"))
+        self.assertEqual(cli.Keys.decode(b"\x1b[A"), "up")
+        self.assertEqual(cli.Keys.decode(b"\x1b[6~"), "pgdn")
+        self.assertIsNone(cli.Keys.decode(b"\x1b[Z"))
         self.assertEqual(cli.Keys.decode(b"Q"), "q")
+        self.assertEqual(cli.Keys.decode(b"G"), "G")
 
     def test_interval_must_be_positive(self):
         parser = cli.build_parser()
@@ -274,16 +277,48 @@ class RenderTests(unittest.TestCase):
 
     def test_frame_never_scrolls_or_wraps(self):
         text = "\n".join("line %d, %s" % (i, "x" * 40) for i in range(40))
-        frame = render.frame(text, size=(20, 10))
+        frame, first, last, total = render.frame(text, size=(20, 10))
         self.assertTrue(frame.startswith("\033[H"))
         self.assertTrue(frame.endswith("\033[K\033[J"))
         self.assertEqual(frame.count("\n"), 9)
         self.assertIn("31 more lines", frame)
+        self.assertEqual((first, last, total), (1, 10, 40))
         lines = render.ANSI.sub("", frame.replace("\033[H", "").replace("\033[J", "")).split("\n")
         self.assertTrue(all(len(line.replace("\033[K", "")) <= 20 for line in lines))
-        self.assertEqual(render.frame("a\nb", size=(20, 10)), "\033[Ha\033[K\nb\033[K\033[J")
-        self.assertEqual(render.frame("x" * 20, size=(20, 10)).count("x"), 18)  # never the last column
-        self.assertNotIn("more lines", render.frame("a\nb\nc", size=(0, 0)))
+        self.assertEqual(render.frame("a\nb", size=(20, 10))[0], "\033[Ha\033[K\nb\033[K\033[J")
+        self.assertEqual(render.frame("x" * 20, size=(20, 10))[0].count("x"), 18)  # never the last column
+        self.assertNotIn("more lines", render.frame("a\nb\nc", size=(0, 0))[0])
+
+    def test_frame_scrolls_the_body_under_a_fixed_head(self):
+        text = "head\n" + "\n".join("line %d" % i for i in range(1, 41))
+        frame, first, last, total = render.frame(text, size=(20, 10), fixed=1, skip=5)
+        self.assertTrue(frame.startswith("\033[Hhead\033[K\nline 6\033[K"))
+        self.assertEqual((first, last, total), (6, 14, 40))
+        # Past the end: the last page stays full.
+        frame, first, last, total = render.frame(text, size=(20, 10), fixed=1, skip=999)
+        self.assertEqual((first, last, total), (32, 40, 40))
+        self.assertNotIn("more lines", frame)
+
+    def test_table_sorts_by_column_and_keeps_children(self):
+        table = render.Table("HOST", ">AGE", "SIZE")
+        table.add("MC1", "-", "3 hosts")
+        table.add("  pc02", "5m 04s", "6.1GB/22.5GB", child=True)
+        table.add("  pc01", "17h 00m", "6.0GB/22.5GB", child=True)
+        table.add("pc09", "2d 01h", "-")
+        table.add("pc03", "40s", "10.2GB/22.5GB")
+        out = _Buffer()
+        table.write(out, render.Palette(False), sort=render.Sort(1))
+        hosts = [line.split()[0] for line in out.text.splitlines()[1:]]
+        self.assertEqual(hosts, ["pc03", "pc09", "MC1", "pc02", "pc01"])  # "-" last, children attached
+        self.assertIn("AGE▾", out.text)
+        sort = render.Sort(-1, reverse=True)
+        out = _Buffer()
+        table.write(out, render.Palette(False), sort=sort)
+        self.assertEqual(sort.column, 2)
+        self.assertIn("SIZE▴", out.text)
+        self.assertEqual(out.text.splitlines()[1].split()[0], "pc03")
+        self.assertEqual(render.sort_key("45%"), (0, 45.0, "45%"))
+        self.assertLess(render.sort_key("2026-09-04 19:47"), render.sort_key("2026-09-05 08:00"))
 
     def test_history_marks_cancelled_tasks_by_their_last_sign_of_life(self):
         task = {"id": 9, "host": "pc", "type": "Deploy", "image": "i", "result": "cancelled",

@@ -105,9 +105,16 @@ another command's output, refreshed at the same interval, so the other
 commands can be found without remembering their names: `t` tasks (one
 line per host), `m` multicast, `h` history, `s` scheduled, `c` clients,
 `d` deployments, `i` images, `o` hosts, `g` groups, `n` snapins, `f`
-info. `x` or Escape returns to the dashboard, `q` quits. The keys need
-a terminal on standard input (`ssh -t` when running the command straight
-from ssh); without one the dashboard only refreshes. With `--once`, or
+info. `x` or Escape returns to the dashboard, `q` quits. `<` and `>`
+sort the view's table by the previous or next column, the way top does,
+`r` reverses; the sorted column carries an arrow in its header, hosts
+of a multicast session stay under their session, and empty cells sort
+last. When the output is longer than the screen, the status line says
+which lines are showing, and `j`/`k` or the arrow keys scroll by a line,
+Page Up/Down or Ctrl-F/Ctrl-B by a page, Ctrl-D/Ctrl-U by half a page,
+Home and End (or `G`) to the ends. The keys need a terminal on standard
+input (`ssh -t` when running the command straight from ssh); without one
+the dashboard only refreshes. With `--once`, or
 when the output is not a terminal, it prints one screen and exits.
 `--json` prints the same data as one dict. The web server access log is not
 read, so "last seen" per client stays with `pyfog clients`.

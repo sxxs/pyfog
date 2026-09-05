@@ -245,7 +245,13 @@ class Keys(object):
     for example `ssh host pyfog dashboard` without -t, read() only waits.
     """
 
-    HOME = (b"\x1b[H", b"\x1b[1~", b"\x1bOH")
+    SEQUENCES = {
+        b"\x1b": "esc", b"\x1b[5~": "pgup", b"\x1b[6~": "pgdn",
+        b"\x1b[H": "home", b"\x1b[1~": "home", b"\x1bOH": "home",
+        b"\x1b[F": "end", b"\x1b[4~": "end", b"\x1bOF": "end",
+        b"\x1b[A": "up", b"\x1b[B": "down",
+        b"\x04": "ctrl-d", b"\x15": "ctrl-u", b"\x06": "ctrl-f", b"\x02": "ctrl-b",
+    }
 
     def __init__(self, enabled=True):
         stdin = sys.stdin if enabled else None
@@ -287,11 +293,17 @@ class Keys(object):
 
     @classmethod
     def decode(cls, data):
-        if data == b"\x1b":
-            return "esc"
-        if data in cls.HOME:
-            return "home"
-        return data.decode("ascii", "replace").lower() if len(data) == 1 else None
+        if data in cls.SEQUENCES:
+            return cls.SEQUENCES[data]
+        if len(data) != 1:
+            return None
+        key = data.decode("ascii", "replace")
+        return key if key == "G" else key.lower()
+
+
+SCROLL = {"j": 1, "down": 1, "k": -1, "up": -1, "ctrl-d": "half", "ctrl-u": "-half",
+          "ctrl-f": "page", "pgdn": "page", "ctrl-b": "-page", "pgup": "-page",
+          "home": "top", "end": "bottom", "G": "bottom"}
 
 
 def watch(args, settings, db, palette, interval):
@@ -299,19 +311,22 @@ def watch(args, settings, db, palette, interval):
 
     On a terminal the screen is redrawn in place: a status line owned by
     this loop, the key line, then the command's output. Keys switch to
-    another command's output (see VIEWS); x, Escape or Home return to
-    the command this started with. Into a pipe or with --json, every
-    round appends one complete document instead, and errors go to stderr.
+    another command's output (see VIEWS); x or Escape return to the
+    command this started with; < > and r sort the view's table; j k,
+    Page Up/Down, Ctrl-D/U, Ctrl-F/B, Home, End and G scroll. Into a
+    pipe or with --json, every round appends one complete document
+    instead, and errors go to stderr.
 
     A failed query does not end the loop: the last good screen stays up
     with the error in the status line, and the next round reconnects.
     """
     live = sys.stdout.isatty() and not args.json
     home = current = args
-    body = ""
+    body, sort, skip = "", render.Sort(), 0
     views = dict(VIEWS)
-    accept = set(views) | {"q", "x", "esc", "home"}
-    key_line = "  ".join("%s %s" % (key, name) for key, name in VIEWS) + "  x back  q quit"
+    accept = set(views) | set(SCROLL) | {"q", "x", "esc", "<", ">", ",", ".", "r"}
+    key_line = "  ".join("%s %s" % (key, name) for key, name in VIEWS) \
+        + "  x back  q quit  < > r sort  j k PgUp PgDn Home End scroll"
     try:
         with Keys(enabled=live) as keys:
             while True:
@@ -325,7 +340,7 @@ def watch(args, settings, db, palette, interval):
                         body = json.dumps(data, indent=2, ensure_ascii=False)
                     else:
                         out = io.StringIO()
-                        show(data, palette, out=out, **kwargs)
+                        show(data, palette, out=out, sort=sort, **kwargs)
                         body = out.getvalue()
                 except (DatabaseError, OSError) as exc:
                     error = exc
@@ -338,25 +353,57 @@ def watch(args, settings, db, palette, interval):
                         sys.stdout.write(body.rstrip("\n") + "\n")
                     else:
                         sys.stderr.write("pyfog: %s: %s, retrying in %ds\n" % (stamp, error, interval))
+                    sys.stdout.flush()
+                    keys.read(interval - (time.monotonic() - started), accept)
+                    continue
+                if error is None:
+                    status = "pyfog %s  refreshed %s in %d ms, every %ds" % (
+                        current.command, stamp, (time.monotonic() - started) * 1000, interval)
                 else:
-                    if error is None:
-                        status = palette.dim("pyfog %s  refreshed %s in %d ms, every %ds" % (
-                            current.command, stamp, (time.monotonic() - started) * 1000, interval))
-                    else:
-                        status = palette.red("pyfog %s  %s  %s, retrying every %ds" % (
-                            current.command, stamp, error, interval))
-                    if keys.enabled:
-                        status += "\n" + palette.dim(key_line)
-                    sys.stdout.write(render.frame(status + "\n" + body))
+                    status = "pyfog %s  %s  %s, retrying every %ds" % (
+                        current.command, stamp, error, interval)
+                head = 2 if keys.enabled else 1
+                # Two passes: the status line names the lines on screen, and
+                # only frame() knows them.
+                screen, first, last, total = render.frame("\n" * (head - 1) + body, fixed=head,
+                                                          skip=skip)
+                if total > last - first + 1:
+                    status += "  lines %d-%d of %d" % (first, last, total)
+                status = palette.red(status) if error else palette.dim(status)
+                if keys.enabled:
+                    status += "\n" + palette.dim(key_line)
+                screen, first, last, total = render.frame(status + "\n" + body, fixed=head, skip=skip)
+                skip = first - 1
+                sys.stdout.write(screen)
                 sys.stdout.flush()
                 key = keys.read(interval - (time.monotonic() - started), accept)
+                page = last - first + 1
                 if key == "q":
                     sys.stdout.write("\n")
                     return 0
-                if key in ("x", "esc", "home"):
-                    current = home
+                if key in ("x", "esc"):
+                    current, sort, skip = home, render.Sort(), 0
                 elif key in views:
-                    current = view_args(args, views[key])
+                    current, sort, skip = view_args(args, views[key]), render.Sort(), 0
+                elif key in ("<", ","):
+                    sort.move(-1)
+                elif key in (">", "."):
+                    sort.move(1)
+                elif key == "r":
+                    sort.reverse = not sort.reverse
+                    if sort.column is None:
+                        sort.column = 0
+                elif key in SCROLL:
+                    step = SCROLL[key]
+                    if step == "top":
+                        skip = 0
+                    elif step == "bottom":
+                        skip = total
+                    elif isinstance(step, int):
+                        skip += step
+                    else:
+                        skip += (-1 if step.startswith("-") else 1) * (page // 2 if "half" in step else page - 1)
+                    skip = max(0, skip)
     except KeyboardInterrupt:
         sys.stdout.write("\n")
         return 130

@@ -94,6 +94,40 @@ def _clip(text, width):
     return plain[:max(0, width - 1)] + "…"
 
 
+class Sort(object):
+    """Which column a table is sorted by, chosen with keys in the live
+    views. column may be None (the order the data came in); Table.write
+    clamps it to the table it is applied to, which is how a negative
+    column comes to mean "the last one"."""
+
+    def __init__(self, column=None, reverse=False):
+        self.column = column
+        self.reverse = reverse
+
+    def move(self, step):
+        self.column = (0 if step > 0 else -1) if self.column is None else self.column + step
+
+
+AGE = re.compile(r"^(?:(\d+)d\s*)?(?:(\d+)h\s*)?(?:(\d+)m\s*)?(?:(\d+)s)?$")
+NUMBER = re.compile(r"^-?\d+(?:\.\d+)?")
+
+
+def sort_key(cell):
+    """Order for one cell as rendered: ages by duration, cells that start
+    with a number by it (sizes, percentages, dates), then text; "-" last."""
+    plain = ANSI.sub("", cell).strip()
+    if plain in ("", "-"):
+        return (2, 0, "")
+    match = AGE.match(plain)
+    if match and any(match.groups()):
+        d, h, m, s = (int(g or 0) for g in match.groups())
+        return (0, ((d * 24 + h) * 60 + m) * 60 + s, plain)
+    match = NUMBER.match(plain)
+    if match:
+        return (0, float(match.group()), plain)
+    return (1, 0, plain.lower())
+
+
 class Table(object):
     """Aligned columns that shrink the widest ones to fit the terminal."""
 
@@ -102,27 +136,51 @@ class Table(object):
         self.aligns = ["r" if c.startswith(">") else "l" for c in columns]
         self.headers = [c.lstrip(">") for c in columns]
         self.rows = []
+        self.children = []  # per row: belongs under the previous top-level row
 
-    def add(self, *cells):
+    def add(self, *cells, **options):
         self.rows.append(["-" if c in (None, "") else str(c) for c in cells])
+        self.children.append(bool(options.get("child")))
 
-    def write(self, out, palette, indent=""):
+    def _ordered(self, sort):
+        """Rows in sort order; child rows travel with their parent."""
+        if sort is None or sort.column is None or not self.rows:
+            return list(self.rows)
+        sort.column = max(0, min(sort.column if sort.column >= 0 else len(self.headers) - 1,
+                                 len(self.headers) - 1))
+        blocks = []
+        for row, child in zip(self.rows, self.children):
+            if child and blocks:
+                blocks[-1].append(row)
+            else:
+                blocks.append([row])
+        keys = {id(block): sort_key(block[0][sort.column]) for block in blocks}
+        # Reverse the values only; empty cells stay last either way.
+        blocks.sort(key=lambda block: keys[id(block)][1:], reverse=sort.reverse)
+        blocks.sort(key=lambda block: keys[id(block)][0])
+        return [row for block in blocks for row in block]
+
+    def write(self, out, palette, indent="", sort=None):
         if not self.rows:
             out.write(indent + palette.dim("(nothing)") + "\n")
             return
-        widths = [max([_visible(h)] + [_visible(r[i]) for r in self.rows])
-                  for i, h in enumerate(self.headers)]
+        rows = self._ordered(sort)
+        headers = list(self.headers)
+        if sort is not None and sort.column is not None:
+            headers[sort.column] += "▴" if sort.reverse else "▾"
+        widths = [max([_visible(h)] + [_visible(r[i]) for r in rows])
+                  for i, h in enumerate(headers)]
         room = shutil.get_terminal_size((160, 25)).columns - len(indent)
         while sum(widths) + 2 * (len(widths) - 1) > room and max(widths) > 10:
             widths[widths.index(max(widths))] -= 1
-        for cells in [self.headers] + self.rows:
+        for cells in [headers] + rows:
             parts = []
             for cell, width, align in zip(cells, widths, self.aligns):
                 cell = _clip(cell, width)
                 pad = " " * (width - _visible(cell))
                 parts.append(pad + cell if align == "r" else cell + pad)
             line = "  ".join(parts).rstrip()
-            out.write(indent + (palette.bold(line) if cells is self.headers else line) + "\n")
+            out.write(indent + (palette.bold(line) if cells is headers else line) + "\n")
 
 
 def _progress(task):
@@ -135,12 +193,12 @@ def _progress(task):
 # -- one function per command --------------------------------------------
 
 
-def tasks(data, palette, out=sys.stdout, expand=False):
+def tasks(data, palette, out=sys.stdout, expand=False, sort=None):
     """data: {"entries": group_multicast(...), "now", "timeout", "imaging_open"}"""
     heading = "Tasks: %d  (server time %s, check-in timeout %ds)" % (
         data["count"], data["now"], data["timeout"])
     out.write(palette.bold(heading) + "\n")
-    task_table(data["entries"], palette, expand).write(out, palette)
+    task_table(data["entries"], palette, expand).write(out, palette, sort=sort)
     imaging_section(data["imaging_open"], palette, out)
 
 
@@ -218,7 +276,7 @@ def _task_row(table, task, palette, indent=""):
     table.add(indent + str(task["id"]), task["host"], task["ip"], task["type"],
               palette.state(task["state"], task["active"], task["stale"]), task["image"],
               _progress(task), task["elapsed"], task["remaining"], task["node"],
-              short_dt(task["created"]), checkin, ",".join(task["flags"]))
+              short_dt(task["created"]), checkin, ",".join(task["flags"]), child=bool(indent))
 
 
 def task(data, palette, out=sys.stdout):
@@ -299,7 +357,7 @@ def session_summary(s, palette, out):
             " (" + ", ".join(log["receivers"]) + ")" if log["receivers"] else ""))
 
 
-def multicast(data, palette, out=sys.stdout):
+def multicast(data, palette, out=sys.stdout, sort=None):
     if not data["sessions"]:
         out.write(palette.dim("no multicast sessions") + "\n")
     for s in data["sessions"]:
@@ -310,11 +368,11 @@ def multicast(data, palette, out=sys.stdout):
             table.add(p["id"], p["host"], p["ip"], palette.state(p["state"], p["active"], p["stale"]),
                       _progress(p), p["elapsed"], p["remaining"],
                       palette.red(checkin) if p["stale"] else checkin)
-        table.write(out, palette, indent="  ")
+        table.write(out, palette, indent="  ", sort=sort)
     orphan_section(data["orphan_senders"], palette, out)
 
 
-def clients(data, palette, out=sys.stdout, stale_after=None):
+def clients(data, palette, out=sys.stdout, stale_after=None, sort=None):
     logs = ", ".join(data["logs"]) or "none readable, token times only"
     if data["logs_unreadable"]:
         logs += "; not readable: " + ", ".join(data["logs_unreadable"])
@@ -329,19 +387,19 @@ def clients(data, palette, out=sys.stdout, stale_after=None):
             age = palette.red(age)
         table.add(h["host"] + (" (pending)" if h["pending"] else ""), h["ip"], h["mac"],
                   h["image"], h["last_seen"], age, h["source"], h["last_call_from"])
-    table.write(out, palette)
+    table.write(out, palette, sort=sort)
 
 
-def deployments(data, palette, out=sys.stdout):
+def deployments(data, palette, out=sys.stdout, sort=None):
     table = Table(">ID", "HOST", "IP", "IMAGE", "KIND", "STARTED", "FINISHED", ">DURATION", "BY")
     for d in data:
         table.add(d["id"], d["host"], d["ip"], d["image"], d["kind"], d["started"],
                   d["finished"] or palette.yellow("running"), age_text(d["duration"]),
                   d["created_by"])
-    table.write(out, palette)
+    table.write(out, palette, sort=sort)
 
 
-def current_images(data, palette, out=sys.stdout):
+def current_images(data, palette, out=sys.stdout, sort=None):
     table = Table("HOST", "IP", "ASSIGNED", "LAST DEPLOYED", "WHEN", "MATCH")
     for h in data:
         if h["deployed"]:
@@ -351,10 +409,10 @@ def current_images(data, palette, out=sys.stdout):
         else:
             match = palette.dim("never deployed")
         table.add(h["host"], h["ip"], h["assigned"], h["deployed"], h["deployed_at"], match)
-    table.write(out, palette)
+    table.write(out, palette, sort=sort)
 
 
-def images(data, palette, out=sys.stdout):
+def images(data, palette, out=sys.stdout, sort=None):
     table = Table(">ID", "NAME", "OS", "TYPE", "FORMAT", ">SIZE", ">HOSTS", "STORAGE",
                   "LAST DEPLOY", "FLAGS", "PATH")
     for i in data:
@@ -363,33 +421,33 @@ def images(data, palette, out=sys.stdout):
                   size_text(i["size_on_server"]), i["hosts_assigned"],
                   ",".join(i["storage_groups"]), short_dt(i["last_deploy"]),
                   ",".join(flags), i["path"])
-    table.write(out, palette)
+    table.write(out, palette, sort=sort)
 
 
-def hosts(data, palette, out=sys.stdout):
+def hosts(data, palette, out=sys.stdout, sort=None):
     table = Table(">ID", "NAME", "IP", "MAC", "IMAGE", "GROUPS", "ACTIVE TASK", "LAST DEPLOY")
     for h in data:
         table.add(h["id"], h["name"] + (" (pending)" if h["pending"] else ""), h["ip"], h["mac"],
                   h["image"], ",".join(h["groups"]), h["active_task"], short_dt(h["last_deploy"]))
-    table.write(out, palette)
+    table.write(out, palette, sort=sort)
 
 
-def groups(data, palette, out=sys.stdout):
+def groups(data, palette, out=sys.stdout, sort=None):
     table = Table(">ID", "NAME", ">MEMBERS", "HOSTS", "DESCRIPTION")
     for g in data:
         table.add(g["id"], g["name"], len(g["members"]), ", ".join(g["members"]), g["description"])
-    table.write(out, palette)
+    table.write(out, palette, sort=sort)
 
 
-def snapins(data, palette, out=sys.stdout):
+def snapins(data, palette, out=sys.stdout, sort=None):
     table = Table("HOST", "SNAPIN", "RESULT", ">CODE", "QUEUED", "COMPLETED", "DETAILS")
     for s in data:
         table.add(s["host"], s["snapin"], palette.result(s["result"]), s["return_code"],
                   short_dt(s["queued"]), short_dt(s["completed"]), s["details"])
-    table.write(out, palette)
+    table.write(out, palette, sort=sort)
 
 
-def history(data, palette, out=sys.stdout, expand=False):
+def history(data, palette, out=sys.stdout, expand=False, sort=None):
     table = Table(">ID", "HOST", "TYPE", "IMAGE", "RESULT", "CREATED", "STARTED", "FINISHED",
                   ">DURATION", "BY")
     for entry in data:
@@ -407,8 +465,8 @@ def history(data, palette, out=sys.stdout, expand=False):
             table.add(("  " if "session" in entry else "") + str(t["id"]), t["host"], t["type"],
                       t["image"], palette.result(t["result"]), short_dt(t["created"]),
                       short_dt(t["started"]), _finished(t, palette), age_text(t["duration"]),
-                      t["created_by"])
-    table.write(out, palette)
+                      t["created_by"], child="session" in entry)
+    table.write(out, palette, sort=sort)
 
 
 def _finished(task, palette):
@@ -422,17 +480,17 @@ def _finished(task, palette):
     return palette.dim("silent since " + last if last else "never checked in")
 
 
-def scheduled(data, palette, out=sys.stdout):
+def scheduled(data, palette, out=sys.stdout, sort=None):
     table = Table(">ID", "NAME", "TYPE", "WHEN", "TARGET", "IMAGE", "ACTIVE")
     for s in data:
         table.add(s["id"], s["name"], s["type"],
                   s["when"] or ("cron " + s["cron"] if s["cron"] else palette.dim("never")),
                   "%s %s" % (s["target_kind"], s["target"]), s["image"],
                   "yes" if s["active"] else palette.dim("no"))
-    table.write(out, palette)
+    table.write(out, palette, sort=sort)
 
 
-def info(data, palette, out=sys.stdout):
+def info(data, palette, out=sys.stdout, sort=None):
     c = data["counts"]
     _pairs([
         ("FOG version", data["fog_version"] or "unknown (web root not found)"),
@@ -454,13 +512,13 @@ def info(data, palette, out=sys.stdout):
     for n in data["storage_nodes"]:
         table.add(n["name"], n["address"], n["group"], "master" if n["master"] else "node",
                   n["interface"], n["max_clients"], "yes" if n["enabled"] else palette.red("no"))
-    table.write(out, palette)
+    table.write(out, palette, sort=sort)
 
 
 # -- dashboard ------------------------------------------------------------
 
 
-def dashboard(data, palette, out=sys.stdout):
+def dashboard(data, palette, out=sys.stdout, sort=None):
     """One screen of live state; data from Fog.dashboard()."""
     heading = "FOG dashboard  server time %s, check-in timeout %ds" % (data["now"], data["timeout"])
     out.write(palette.bold(heading) + "\n")
@@ -478,7 +536,7 @@ def dashboard(data, palette, out=sys.stdout):
         parts.append(palette.red("%d udp-sender without a session" % len(data["orphan_senders"])))
     out.write("  ".join(parts) + "\n\n")
 
-    task_table(data["entries"], palette, expand=True).write(out, palette)
+    task_table(data["entries"], palette, expand=True).write(out, palette, sort=sort)
     imaging_section(data["imaging_open"], palette, out)
     for s in data["sessions"]:
         out.write("\n")
@@ -492,14 +550,17 @@ def dashboard(data, palette, out=sys.stdout):
         scheduled(data["scheduled"], palette, out)
 
 
-def frame(text, size=None):
+def frame(text, size=None, fixed=0, skip=0):
     """Turn rendered text into one screen update for a terminal.
 
     Built for slow links and ssh sessions: no alternate screen, no full
     clear, no cursor games. The cursor goes home, every line overwrites
     its predecessor to the end of the line, and whatever the previous
-    frame left below is cleared once. Lines that do not fit the terminal
-    are dropped and counted in the last row, so the screen never scrolls.
+    frame left below is cleared once. The first `fixed` lines always
+    show; of the rest, `skip` lines are scrolled off the top and what
+    does not fit is counted in the last row, so the screen never scrolls
+    by itself. Returns (screen, first, last, total): which body lines
+    (1-based) are on screen, of how many.
     """
     columns, rows = size or shutil.get_terminal_size((160, 25))
     # A pty without a window size reports 0x0 on older Pythons.
@@ -507,6 +568,11 @@ def frame(text, size=None):
     # One column short: a line that fills the row leaves the cursor in the
     # terminal's pending-wrap state, where erase-to-end eats the last cell.
     lines = [_clip(line, columns - 1) for line in text.rstrip("\n").split("\n")]
-    if len(lines) > rows:
-        lines = lines[:rows - 1] + ["… %d more lines" % (len(lines) - rows + 1)]
-    return "\033[H" + "\033[K\n".join(lines) + "\033[K\033[J"
+    head, body = lines[:fixed], lines[fixed:]
+    room = max(1, rows - len(head))
+    skip = max(0, min(skip, len(body) - room))
+    shown = body[skip:]
+    if len(shown) > room:
+        shown = shown[:room - 1] + ["… %d more lines" % (len(shown) - room + 1)]
+    screen = "\033[H" + "\033[K\n".join(head + shown) + "\033[K\033[J"
+    return screen, skip + 1, skip + len(shown), len(body)
