@@ -4,6 +4,7 @@
     interfaces     /proc/net/dev, for the throughput while hosts are imaging
     neighbours     /proc/net/arp and arping, to see which hosts answer on the wire
     access logs    the web server log, to see when a FOG client last called in
+    image store    the storage node's own directories, for what an image weighs
     udpcast logs   udp-sender's own output, to see which receivers joined
 """
 
@@ -315,6 +316,39 @@ def arping(targets, timeout=1.0, workers=32):
     with ThreadPoolExecutor(max_workers=min(workers, len(targets))) as pool:
         results = list(pool.map(lambda t: arping_one(t[0], t[1], timeout), targets))
     return {ip: result for (ip, _), result in zip(targets, results)}
+
+
+# -- image store ------------------------------------------------------------
+
+
+def stored_size(path):
+    """What an image weighs here: the sum of the files under path, or the
+    file's own size when the image is a single file.
+
+    None when nothing can be measured -- the path is missing, or a
+    directory in it cannot be listed. That is not always an error: with
+    more than one storage node the image may live on another machine than
+    the one pyfog runs on, and the caller then falls back to what the
+    database was last told. A partial sum is never returned, because a
+    size that is quietly too small is worse than no size at all.
+    """
+    if not path:
+        return None
+    if not os.path.isdir(path):
+        try:
+            return os.path.getsize(path)
+        except OSError:
+            return None
+    failed, total = [], 0
+    for parent, _dirs, files in os.walk(path, onerror=failed.append):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(parent, name)).st_size
+            except OSError:
+                # A file that went away mid-walk: a capture in progress
+                # writes into its directory while this runs.
+                failed.append(name)
+    return None if failed else total
 
 
 # -- web server access log --------------------------------------------------

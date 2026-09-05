@@ -171,6 +171,40 @@ class LocalTests(unittest.TestCase):
         # Naive UTC, whatever this process's time zone is.
         self.assertEqual(calls["001122334401"]["last_seen"], datetime(2026, 9, 5, 9, 0, 0))
 
+    def test_stored_size_sums_an_image_directory(self):
+        root = tempfile.mkdtemp()
+        try:
+            os.makedirs(os.path.join(root, "WS20260905_01"))
+            for name, size in (("d1p1.img", 15074415), ("d1p2.img", 5427), ("d1.mbr", 1048576)):
+                with open(os.path.join(root, "WS20260905_01", name), "wb") as fh:
+                    fh.write(b"\0" * 8)
+                    fh.truncate(size)
+            self.assertEqual(local.stored_size(os.path.join(root, "WS20260905_01")),
+                             15074415 + 5427 + 1048576)
+            # A single file image, and a path that is not there at all.
+            self.assertEqual(local.stored_size(os.path.join(root, "WS20260905_01", "d1.mbr")),
+                             1048576)
+            self.assertIsNone(local.stored_size(os.path.join(root, "gone")))
+            self.assertIsNone(local.stored_size(None))
+        finally:
+            shutil.rmtree(root)
+
+    def test_stored_size_reports_nothing_rather_than_too_little(self):
+        # An unreadable directory would otherwise be summed as 0 bytes, which
+        # reads like an empty image instead of like a failed measurement.
+        root = tempfile.mkdtemp()
+        try:
+            os.makedirs(os.path.join(root, "img", "sub"))
+            with open(os.path.join(root, "img", "d1p1.img"), "wb") as fh:
+                fh.truncate(4096)
+            os.chmod(os.path.join(root, "img", "sub"), 0)
+            measured = local.stored_size(os.path.join(root, "img"))
+            os.chmod(os.path.join(root, "img", "sub"), 0o755)
+            if os.geteuid() != 0:  # root may list it anyway
+                self.assertIsNone(measured)
+        finally:
+            shutil.rmtree(root)
+
     def test_udpcast_log(self):
         with tempfile.NamedTemporaryFile("w", delete=False) as fh:
             fh.write("New connection from 10.0.0.11  (#0)\rNew connection from 10.0.0.12  (#1)\n"
@@ -668,6 +702,45 @@ class CliTests(unittest.TestCase):
         self.assertTrue(parser.parse_args(["tasks", "--json"]).json)
         self.assertTrue(parser.parse_args(["--json", "tasks"]).json)
         self.assertFalse(parser.parse_args(["tasks"]).json)
+
+
+class ImageSizeTests(unittest.TestCase):
+    """Where the size of an image comes from, and what it means."""
+
+    def test_image_dir_joins_the_node_root_and_the_image_folder(self):
+        self.assertEqual(fog.image_dir("/images", "WS20260905_01"), "/images/WS20260905_01")
+        self.assertEqual(fog.image_dir("/images/", "WS20260905_01"), "/images/WS20260905_01")
+        self.assertEqual(fog.image_dir(None, "WS20260905_01"), "/images/WS20260905_01")
+        # Old records keep a full path in imagePath; it is already the answer.
+        self.assertEqual(fog.image_dir("/images", "/opt/img/x"), "/opt/img/x")
+        self.assertIsNone(fog.image_dir("/images", ""))
+
+    def test_client_size_sums_the_colon_list_fog_writes(self):
+        self.assertEqual(fog.client_size("500107862016:"), 500107862016)
+        self.assertEqual(fog.client_size("104857600:16777216:"), 121634816)
+        self.assertIsNone(fog.client_size(""))
+        self.assertIsNone(fog.client_size(None))
+        self.assertIsNone(fog.client_size("0:"))
+
+    def test_the_size_column_prefers_the_disk_and_marks_the_database(self):
+        plain = render.Palette(False)
+        base = {"id": 8, "name": "WS20260905_01", "os": "Windows 10", "type": "Single Disk",
+                "format": "Partclone Zstd", "enabled": True, "protected": False,
+                "hosts_assigned": 34, "storage_groups": ["default"], "path": "WS20260905_01",
+                "last_deploy": "2026-09-05 22:11:00", "size_on_server": None}
+        out = _Buffer()
+        # Measured on this machine: shown, even though FOGImageSize has not
+        # run yet and the database still says nothing.
+        render.images([dict(base, size_on_disk=16817125329)], plain, out)
+        self.assertIn("15.7 GiB", out.text)
+        # Not measurable here: the database keeps the column populated.
+        out = _Buffer()
+        render.images([dict(base, size_on_disk=None, size_on_server=16323206183)], plain, out)
+        self.assertIn("15.2 GiB", out.text)
+        # Neither: no invented number.
+        out = _Buffer()
+        render.images([dict(base, size_on_disk=None)], plain, out)
+        self.assertRegex(out.text.splitlines()[1], r"Zstd\s+-\s")
 
 
 class RenderTests(unittest.TestCase):

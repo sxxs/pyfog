@@ -480,8 +480,15 @@ def images(data, palette, out=sys.stdout, sort=None):
                   "LAST DEPLOY", "FLAGS", "PATH")
     for i in data:
         flags = [f for f, on in (("disabled", not i["enabled"]), ("protected", i["protected"])) if on]
+        # Measured here beats what FOG last recorded: imageServerSize is
+        # written by the FOGImageSize service on its own schedule (hourly by
+        # default), so it is empty for a fresh capture and stale after a
+        # re-capture. It is still shown, dimmed, when the files cannot be
+        # reached from this machine.
+        size = size_text(i["size_on_disk"]) if i["size_on_disk"] is not None \
+            else palette.dim(size_text(i["size_on_server"]))
         table.add(i["id"], i["name"], i["os"], i["type"], i["format"],
-                  size_text(i["size_on_server"]), i["hosts_assigned"],
+                  size, i["hosts_assigned"],
                   ",".join(i["storage_groups"]), short_dt(i["last_deploy"]),
                   ",".join(flags), i["path"])
     table.write(out, palette, sort=sort)

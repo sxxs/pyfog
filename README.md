@@ -444,6 +444,28 @@ installation.
 * **Deployments** are `imagingLog` rows; `ilType` `down` is a deploy,
   `up` a capture. `--current` compares the last finished deploy per host
   with the image assigned in `hosts.hostImage`.
+* **Image size** is measured, not read: pyfog sums the files under the
+  image's directory on the storage node
+  (`nfsGroupMembers.ngmRootPath` + `images.imagePath`). Neither size
+  column in `images` can carry that weight. `imageServerSize` is written
+  by the `FOGImageSize` service on its own schedule -- hourly by default
+  -- so it is empty for a capture that just finished and stale after a
+  re-capture. `imageSize` is worse: FOG clears it when a capture checks in
+  (`lib/reg-task/taskqueue.class.php`) and then appends one number per
+  partition out of the progress ping the host sends every three seconds
+  (`service/progress.php`, fed by `/bin/fog.statusreporter`, which reads
+  a single line out of `/tmp/status.fog` and truncates the file). A
+  partition that partclone finishes inside one of those windows never
+  lands a number, so an EFI or MSR partition appears in one capture of a
+  disk and is missing from the next; the same routine also drops a value
+  that occurs as a substring of the ones already collected. Nothing in
+  FOG reads either column back for imaging -- a deploy takes the layout
+  from the files in the image directory -- so a missing number costs
+  nothing but the display. pyfog shows what it measured, and falls back
+  to `imageServerSize` in grey when the files cannot be reached from the
+  machine it runs on (an image on another storage node). Both raw values
+  stay in `pyfog images --json` as `size_on_server` and `size_on_client`,
+  the latter summed the way FOG's own image list sums it.
 
 ## Cleaning up lost tasks
 
@@ -595,7 +617,7 @@ enables the `FOG*` units again.
 bin/pyfog            launcher for running from a checkout
 pyfog/config.py     credential discovery
 pyfog/db.py         SELECT-only queries through PyMySQL
-pyfog/local.py      /proc, interfaces and ARP, access log, udpcast log
+pyfog/local.py      /proc, interfaces and ARP, access log, udpcast log, image store
 pyfog/fog.py        data layer: plain dicts, no printing
 pyfog/render.py     tables for the terminal
 pyfog/cli.py        argument parsing and wiring

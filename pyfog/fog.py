@@ -99,6 +99,38 @@ def text(value):
     return (value or "").strip() or None
 
 
+def client_size(value):
+    """images.imageSize summed, the way FOG's own image list sums it
+    (array_sum(explode(':', ...)) in lib/pages/imagemanagementpage.class.php):
+    the bytes the partitions took on the machine the image was captured
+    from, before compression.
+
+    It is a floor, not a total. FOG does not write this column at capture
+    time; it appends one number per partition from the progress ping the
+    host sends every three seconds (service/progress.php, fed by
+    /bin/fog.statusreporter, which reads one line out of /tmp/status.fog
+    and truncates the file). A partition that partclone finishes inside
+    one of those windows never lands a number, so small partitions -- EFI,
+    MSR -- come and go between captures of the same disk. The same routine
+    also skips a value that already occurs as a substring of the ones
+    collected so far. Nothing in FOG reads the column back except that one
+    display, so a missing entry costs nothing beyond the number itself.
+    """
+    parts = [to_int(p) for p in (value or "").split(":") if p.strip()]
+    return sum(p for p in parts if p is not None) or None
+
+
+def image_dir(root, path):
+    """Where an image's files sit on the storage node. FOG keeps the node's
+    root (nfsGroupMembers.ngmRootPath, normally /images) apart from the
+    image's own folder (images.imagePath); older records hold a full path
+    there already, and those are taken as they are.
+    """
+    if not path:
+        return None
+    return path if path.startswith("/") else "%s/%s" % ((root or "/images").rstrip("/"), path)
+
+
 class Fog(object):
     """One snapshot of a FOG server. now() is fixed at first use so every
     age in one report refers to the same instant."""
@@ -696,31 +728,42 @@ class Fog(object):
                    (SELECT COUNT(*) FROM hosts WHERE hostImage = i.imageID) AS hostCount,
                    (SELECT GROUP_CONCAT(ng.ngName ORDER BY iga.igaPrimary DESC, ng.ngName)
                       FROM imageGroupAssoc iga JOIN nfsGroups ng ON ng.ngID = iga.igaStorageGroupID
-                     WHERE iga.igaImageID = i.imageID) AS storageGroups
+                     WHERE iga.igaImageID = i.imageID) AS storageGroups,
+                   (SELECT ngm.ngmRootPath
+                      FROM imageGroupAssoc iga JOIN nfsGroupMembers ngm
+                        ON ngm.ngmGroupID = iga.igaStorageGroupID AND ngm.ngmIsMasterNode = '1'
+                     WHERE iga.igaImageID = i.imageID
+                     ORDER BY iga.igaPrimary DESC LIMIT 1) AS rootPath
             FROM images i
             LEFT JOIN os o ON o.osID = i.imageOSID
             LEFT JOIN imageTypes it ON it.imageTypeID = i.imageTypeID
             LEFT JOIN imagePartitionTypes ipt ON ipt.imagePartitionTypeID = i.imagePartitionTypeID
             ORDER BY i.imageName""")
-        return [{
-            "id": r["imageID"],
-            "name": r["imageName"],
-            "description": text(r["imageDesc"]),
-            "path": r["imagePath"],
-            "os": r["osName"],
-            "type": r["imageTypeName"],
-            "partitions": r["imagePartitionTypeName"],
-            "format": IMAGE_FORMATS.get(r["imageFormat"], r["imageFormat"]),
-            "enabled": r["imageEnabled"] != "0",
-            "protected": bool(r["imageProtect"]),
-            "size_on_server": r["imageServerSize"] or None,
-            "size_on_client": (r["imageSize"] or "").strip(":") or None,
-            "hosts_assigned": r["hostCount"],
-            "storage_groups": r["storageGroups"].split(",") if r["storageGroups"] else [],
-            "last_deploy": dt_text(r["imageLastDeploy"]),
-            "created": dt_text(r["imageDateTime"]),
-            "created_by": text(r["imageCreateBy"]),
-        } for r in rows]
+        out = []
+        for r in rows:
+            directory = image_dir(r["rootPath"], r["imagePath"])
+            out.append({
+                "id": r["imageID"],
+                "name": r["imageName"],
+                "description": text(r["imageDesc"]),
+                "path": r["imagePath"],
+                "directory": directory,
+                "os": r["osName"],
+                "type": r["imageTypeName"],
+                "partitions": r["imagePartitionTypeName"],
+                "format": IMAGE_FORMATS.get(r["imageFormat"], r["imageFormat"]),
+                "enabled": r["imageEnabled"] != "0",
+                "protected": bool(r["imageProtect"]),
+                "size_on_disk": local.stored_size(directory),
+                "size_on_server": r["imageServerSize"] or None,
+                "size_on_client": client_size(r["imageSize"]),
+                "hosts_assigned": r["hostCount"],
+                "storage_groups": r["storageGroups"].split(",") if r["storageGroups"] else [],
+                "last_deploy": dt_text(r["imageLastDeploy"]),
+                "created": dt_text(r["imageDateTime"]),
+                "created_by": text(r["imageCreateBy"]),
+            })
+        return out
 
     # -- hosts, groups, snapins ---------------------------------------------
 
